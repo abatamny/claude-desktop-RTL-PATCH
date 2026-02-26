@@ -85,7 +85,7 @@ $RTL_INJECTION_CODE = @'
             if (firstStrongIsRTL) return true;
 
             const totalLetters = rtlCount + ltrCount;
-            return totalLetters > 0 && (rtlCount / totalLetters) >= 0.3;
+            return totalLetters > 0 && (rtlCount / totalLetters) >= 0.5;
         }
 
         function forceCodeBlocksLTR(element) {
