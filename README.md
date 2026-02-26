@@ -1,4 +1,4 @@
-# Claude Desktop RTL Patch 🇮🇱
+# Claude Desktop RTL Patch
 
 Smart RTL (Right-to-Left) support for **Claude Desktop on Windows**. Adds automatic Hebrew/Arabic text direction detection without breaking English or code blocks.
 
