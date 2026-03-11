@@ -58,15 +58,21 @@ $RTL_INJECTION_CODE = @'
             return RTL_RANGES.some(range => code >= range.start && code <= range.end);
         }
 
+        function hasAnyRTL(text) {
+            if (!text) return false;
+            for (const char of text) {
+                if (isRTLChar(char)) return true;
+            }
+            return false;
+        }
+
         function shouldBeRTLText(text) {
             if (!text) return false;
             const trimmed = text.trim();
             if (!trimmed) return false;
-
             let firstStrongIsRTL = null;
             let rtlCount = 0;
             let ltrCount = 0;
-
             for (const char of trimmed) {
                 if (isRTLChar(char)) {
                     rtlCount++;
@@ -76,24 +82,21 @@ $RTL_INJECTION_CODE = @'
                     if (firstStrongIsRTL === null) firstStrongIsRTL = false;
                 }
             }
-
             if (firstStrongIsRTL === null) return false;
             if (firstStrongIsRTL) return true;
-
             const totalLetters = rtlCount + ltrCount;
             return totalLetters > 0 && (rtlCount / totalLetters) >= 0.5;
         }
 
-        function forceCodeBlocksLTR(element) {
-            element.querySelectorAll('pre, .code-block__code, .relative.group\\/copy').forEach(block => {
-                block.style.direction = 'ltr';
+        function forceCodeBlocksLTR(root) {
+            root.querySelectorAll('pre, .code-block__code, .relative.group\\/copy').forEach(block => {
+                block.dir = 'ltr';
                 block.style.textAlign = 'left';
                 block.style.unicodeBidi = 'embed';
             });
-            element.querySelectorAll('code').forEach(code => {
+            root.querySelectorAll('code').forEach(function(code) {
                 if (!code.closest('pre') && !code.closest('.code-block__code')) {
-                    code.style.direction = 'ltr';
-                    code.style.unicodeBidi = 'isolate';
+                    code.dir = 'ltr';
                 }
             });
         }
@@ -102,38 +105,36 @@ $RTL_INJECTION_CODE = @'
             root.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, summary, label, dt, dd').forEach(el => {
                 if (el.closest(SELECTORS.WRITING) || el.closest('pre') || el.closest('.code-block__code')) return;
 
-                if (shouldBeRTLText(el.textContent)) {
-                    el.style.direction = 'rtl';
-                    el.style.textAlign = 'right';
-                    el.style.unicodeBidi = 'plaintext';
+                if (hasAnyRTL(el.textContent)) {
+                    el.dir = 'auto';
                     if (el.tagName === 'LI') {
-                        el.style.listStylePosition = 'inside';
+                        var computedDir = getComputedStyle(el).direction;
+                        el.style.listStylePosition = (computedDir === 'rtl') ? 'inside' : '';
                     }
                 } else {
-                    el.style.direction = '';
-                    el.style.textAlign = '';
-                    el.style.unicodeBidi = '';
-                    if (el.tagName === 'LI') {
-                        el.style.listStylePosition = '';
-                    }
+                    if (el.hasAttribute('dir')) el.removeAttribute('dir');
+                    if (el.tagName === 'LI') el.style.listStylePosition = '';
                 }
             });
 
             root.querySelectorAll('ul, ol').forEach(el => {
                 if (el.closest(SELECTORS.WRITING) || el.closest('pre')) return;
 
-                const text = el.textContent || '';
-                if (shouldBeRTLText(text)) {
-                    el.style.direction = 'rtl';
-                    el.style.textAlign = 'right';
-                    const computedPL = getComputedStyle(el).paddingLeft;
-                    if (parseFloat(computedPL) > 0) {
-                        el.style.paddingRight = computedPL;
-                        el.style.paddingLeft = '0';
+                if (hasAnyRTL(el.textContent)) {
+                    el.dir = 'auto';
+                    var computedDir = getComputedStyle(el).direction;
+                    if (computedDir === 'rtl') {
+                        var computedPL = getComputedStyle(el).paddingLeft;
+                        if (parseFloat(computedPL) > 0) {
+                            el.style.paddingRight = computedPL;
+                            el.style.paddingLeft = '0';
+                        }
+                    } else {
+                        el.style.paddingRight = '';
+                        el.style.paddingLeft = '';
                     }
                 } else {
-                    el.style.direction = '';
-                    el.style.textAlign = '';
+                    if (el.hasAttribute('dir')) el.removeAttribute('dir');
                     el.style.paddingRight = '';
                     el.style.paddingLeft = '';
                 }
@@ -142,21 +143,19 @@ $RTL_INJECTION_CODE = @'
             root.querySelectorAll('[role="dialog"] div, [role="dialog"] span, [role="alertdialog"] div, [role="alertdialog"] span, [data-radix-portal] div, [data-radix-portal] span').forEach(el => {
                 if (el.closest('pre') || el.closest('code') || el.closest(SELECTORS.WRITING)) return;
                 if (el.querySelector('div, p, ul, ol, h1, h2, h3, h4, h5, h6, pre, table')) return;
-                const text = el.textContent?.trim();
-                if (text && shouldBeRTLText(text)) {
-                    el.style.direction = 'rtl';
-                    el.style.textAlign = 'right';
-                } else if (text) {
-                    el.style.direction = '';
-                    el.style.textAlign = '';
+                var text = el.textContent?.trim();
+                if (text && hasAnyRTL(text)) {
+                    el.dir = 'auto';
+                } else if (el.hasAttribute('dir')) {
+                    el.removeAttribute('dir');
                 }
             });
         }
 
         function processInputBox() {
-            const inputs = document.querySelectorAll(SELECTORS.WRITING);
-            inputs.forEach(input => {
-                const text = input.textContent || input.innerText || '';
+            var inputs = document.querySelectorAll(SELECTORS.WRITING);
+            inputs.forEach(function(input) {
+                var text = input.textContent || input.innerText || '';
                 if (shouldBeRTLText(text)) {
                     input.style.direction = 'rtl';
                     input.style.textAlign = 'right';
@@ -179,7 +178,7 @@ $RTL_INJECTION_CODE = @'
             if (document.getElementById('claude-rtl-global-styles')) return;
             var style = document.createElement('style');
             style.id = 'claude-rtl-global-styles';
-            style.textContent = 'p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, summary, label, legend, dt, dd, figcaption, caption { unicode-bidi: plaintext; direction: auto; } pre, .code-block__code, .relative.group\\/copy { unicode-bidi: embed !important; direction: ltr !important; text-align: left !important; } code { unicode-bidi: isolate !important; direction: ltr !important; }';
+            style.textContent = 'p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, summary, label, legend, dt, dd, figcaption, caption { unicode-bidi: plaintext !important; text-align: start !important; } pre, .code-block__code, .relative.group\\/copy { unicode-bidi: embed !important; direction: ltr !important; text-align: left !important; } code { unicode-bidi: isolate !important; direction: ltr !important; }';
             document.head.appendChild(style);
         }
 
@@ -188,9 +187,9 @@ $RTL_INJECTION_CODE = @'
             processElements();
 
             document.addEventListener('input', function(event) {
-                const target = event.target;
+                var target = event.target;
                 if (target && (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT' || target.isContentEditable)) {
-                    const currentText = target.textContent || target.innerText || target.value || '';
+                    var currentText = target.textContent || target.innerText || target.value || '';
                     if (shouldBeRTLText(currentText)) {
                         target.style.direction = 'rtl';
                         target.style.textAlign = 'right';
@@ -203,18 +202,20 @@ $RTL_INJECTION_CODE = @'
                 }
             }, true);
 
-            const observer = new MutationObserver((mutations) => {
-                let hasChanges = mutations.some(m => m.addedNodes.length > 0 || m.type === 'characterData');
+            var observer = new MutationObserver(function(mutations) {
+                var hasChanges = mutations.some(function(m) {
+                    return m.addedNodes.length > 0 || m.type === 'characterData';
+                });
                 if (hasChanges) {
                     clearTimeout(window._rtlProcessTimeout);
-                    window._rtlProcessTimeout = setTimeout(() => {
-                        const roots = new Set();
-                        mutations.forEach(m => {
-                            m.addedNodes.forEach(n => { if (n.nodeType === 1) roots.add(n); });
+                    window._rtlProcessTimeout = setTimeout(function() {
+                        var roots = new Set();
+                        mutations.forEach(function(m) {
+                            m.addedNodes.forEach(function(n) { if (n.nodeType === 1) roots.add(n); });
                             if (m.type === 'characterData' && m.target.parentElement) roots.add(m.target.parentElement);
                         });
                         if (roots.size > 0 && roots.size <= 20) {
-                            roots.forEach(root => {
+                            roots.forEach(function(root) {
                                 processTextElements(root);
                                 forceCodeBlocksLTR(root);
                             });
