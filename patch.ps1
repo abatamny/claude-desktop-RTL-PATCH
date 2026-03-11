@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Claude Desktop Smart RTL Patcher & Service Fixer
 .DESCRIPTION
@@ -43,11 +43,7 @@ $RTL_INJECTION_CODE = @'
     if (typeof document === 'undefined') return;
     try {
         const SELECTORS = {
-            RESPONSES: '.font-claude-message, .font-claude-message.mx-auto.w-full.max-w-3xl, .font-claude-response-body, .standard-markdown',
-            PARAGRAPHS: '.whitespace-pre-wrap.break-words, .grid-cols-1.grid.gap-2\\.5, .standard-markdown.grid-cols-1.grid.gap-4',
-            LISTS: 'ol.list-decimal, ul.list-disc, .standard-markdown ol, .standard-markdown ul',
-            WRITING: '[data-testid="chat-input"]',
-            SETTINGS: '.bg-bg-000.border'
+            WRITING: '[data-testid="chat-input"]'
         };
 
         const RTL_RANGES = [
@@ -89,17 +85,22 @@ $RTL_INJECTION_CODE = @'
         }
 
         function forceCodeBlocksLTR(element) {
-            const codeBlocks = element.querySelectorAll('pre, code, .code-block__code, .relative.group\\/copy');
-            codeBlocks.forEach(block => {
+            element.querySelectorAll('pre, .code-block__code, .relative.group\\/copy').forEach(block => {
                 block.style.direction = 'ltr';
                 block.style.textAlign = 'left';
                 block.style.unicodeBidi = 'embed';
             });
+            element.querySelectorAll('code').forEach(code => {
+                if (!code.closest('pre') && !code.closest('.code-block__code')) {
+                    code.style.direction = 'ltr';
+                    code.style.unicodeBidi = 'isolate';
+                }
+            });
         }
 
-        function processChildrenForRTL(element) {
-            element.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6').forEach(el => {
-                if (el.closest(SELECTORS.WRITING)) return;
+        function processTextElements(root) {
+            root.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, summary, label, dt, dd').forEach(el => {
+                if (el.closest(SELECTORS.WRITING) || el.closest('pre') || el.closest('.code-block__code')) return;
 
                 if (shouldBeRTLText(el.textContent)) {
                     el.style.direction = 'rtl';
@@ -118,18 +119,16 @@ $RTL_INJECTION_CODE = @'
                 }
             });
 
-            element.querySelectorAll('ul, ol').forEach(el => {
-                if (el.closest(SELECTORS.WRITING)) return;
-                
+            root.querySelectorAll('ul, ol').forEach(el => {
+                if (el.closest(SELECTORS.WRITING) || el.closest('pre')) return;
+
                 const text = el.textContent || '';
                 if (shouldBeRTLText(text)) {
                     el.style.direction = 'rtl';
                     el.style.textAlign = 'right';
-                    if (el.classList.contains('pl-7')) {
-                        el.style.paddingRight = '1.75rem';
-                        el.style.paddingLeft = '0';
-                    } else {
-                        el.style.paddingRight = '1em';
+                    const computedPL = getComputedStyle(el).paddingLeft;
+                    if (parseFloat(computedPL) > 0) {
+                        el.style.paddingRight = computedPL;
                         el.style.paddingLeft = '0';
                     }
                 } else {
@@ -137,6 +136,19 @@ $RTL_INJECTION_CODE = @'
                     el.style.textAlign = '';
                     el.style.paddingRight = '';
                     el.style.paddingLeft = '';
+                }
+            });
+
+            root.querySelectorAll('[role="dialog"] div, [role="dialog"] span, [role="alertdialog"] div, [role="alertdialog"] span, [data-radix-portal] div, [data-radix-portal] span').forEach(el => {
+                if (el.closest('pre') || el.closest('code') || el.closest(SELECTORS.WRITING)) return;
+                if (el.querySelector('div, p, ul, ol, h1, h2, h3, h4, h5, h6, pre, table')) return;
+                const text = el.textContent?.trim();
+                if (text && shouldBeRTLText(text)) {
+                    el.style.direction = 'rtl';
+                    el.style.textAlign = 'right';
+                } else if (text) {
+                    el.style.direction = '';
+                    el.style.textAlign = '';
                 }
             });
         }
@@ -158,25 +170,7 @@ $RTL_INJECTION_CODE = @'
         }
 
         function processElements() {
-            document.querySelectorAll(SELECTORS.RESPONSES).forEach(el => {
-                if (el.closest(SELECTORS.WRITING)) return;
-                processChildrenForRTL(el);
-                forceCodeBlocksLTR(el);
-            });
-
-            document.querySelectorAll(SELECTORS.PARAGRAPHS).forEach(el => {
-                if (el.closest(SELECTORS.WRITING)) return;
-                if (!el.closest(SELECTORS.RESPONSES)) { 
-                    if (shouldBeRTLText(el.textContent)) {
-                        el.style.direction = 'rtl';
-                        el.style.textAlign = 'right';
-                    } else {
-                        el.style.direction = '';
-                        el.style.textAlign = '';
-                    }
-                }
-            });
-
+            processTextElements(document);
             processInputBox();
             forceCodeBlocksLTR(document.body);
         }
@@ -185,7 +179,7 @@ $RTL_INJECTION_CODE = @'
             if (document.getElementById('claude-rtl-global-styles')) return;
             var style = document.createElement('style');
             style.id = 'claude-rtl-global-styles';
-            style.textContent = 'p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, summary { unicode-bidi: plaintext; direction: auto; } pre, code, .code-block__code, .relative.group\\/copy { unicode-bidi: embed !important; direction: ltr !important; text-align: left !important; }';
+            style.textContent = 'p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, summary, label, legend, dt, dd, figcaption, caption { unicode-bidi: plaintext; direction: auto; } pre, .code-block__code, .relative.group\\/copy { unicode-bidi: embed !important; direction: ltr !important; text-align: left !important; } code { unicode-bidi: isolate !important; direction: ltr !important; }';
             document.head.appendChild(style);
         }
 
@@ -213,7 +207,22 @@ $RTL_INJECTION_CODE = @'
                 let hasChanges = mutations.some(m => m.addedNodes.length > 0 || m.type === 'characterData');
                 if (hasChanges) {
                     clearTimeout(window._rtlProcessTimeout);
-                    window._rtlProcessTimeout = setTimeout(() => { processElements(); }, 50);
+                    window._rtlProcessTimeout = setTimeout(() => {
+                        const roots = new Set();
+                        mutations.forEach(m => {
+                            m.addedNodes.forEach(n => { if (n.nodeType === 1) roots.add(n); });
+                            if (m.type === 'characterData' && m.target.parentElement) roots.add(m.target.parentElement);
+                        });
+                        if (roots.size > 0 && roots.size <= 20) {
+                            roots.forEach(root => {
+                                processTextElements(root);
+                                forceCodeBlocksLTR(root);
+                            });
+                            processInputBox();
+                        } else {
+                            processElements();
+                        }
+                    }, 50);
                 }
             });
 
@@ -482,15 +491,25 @@ function Install-Patch {
         if (Test-Path $BuildDir) {
             $JsFiles = Get-ChildItem -Path $BuildDir -Filter "*.js" -Recurse
             $Injected = 0
+            $Skipped = 0
             foreach ($file in $JsFiles) {
                 $content = Get-Content $file.FullName -Raw
-                if ($content -notmatch "CLAUDE RTL PATCH START") {
-                    $newContent = $RTL_INJECTION_CODE + "`n" + $content
-                    [System.IO.File]::WriteAllText($file.FullName, $newContent, [System.Text.Encoding]::UTF8)
-                    $Injected++
+                if ($content -match "CLAUDE RTL PATCH START") { continue }
+
+                # Only inject into renderer files (files that use DOM/React)
+                $hasDOM = $content -match 'document\.' -or $content -match 'ReactDOM' -or $content -match 'createElement'
+                if (-not $hasDOM) {
+                    Write-Log "Skipping non-UI file: $($file.Name)"
+                    $Skipped++
+                    continue
                 }
+
+                $newContent = $RTL_INJECTION_CODE + "`n" + $content
+                [System.IO.File]::WriteAllText($file.FullName, $newContent, [System.Text.Encoding]::UTF8)
+                $Injected++
+                Write-Log "Injected RTL into: $($file.Name)"
             }
-            if ($Injected -gt 0) { Write-Success "Injected RTL JS logic into $Injected files." }
+            if ($Injected -gt 0) { Write-Success "Injected RTL JS logic into $Injected renderer file(s). Skipped $Skipped non-UI file(s)." }
             else { Write-Warn "JS files already patched or not found." }
         }
 
