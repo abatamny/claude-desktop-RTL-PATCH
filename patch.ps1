@@ -132,44 +132,53 @@ $RTL_INJECTION_CODE = @'
 
         // --- ELEMENT PROCESSING ---
 
+        // querySelectorAll that INCLUDES root itself if it matches
+        function qsa(root, sel) {
+            var base = root.querySelectorAll ? root : document;
+            var els = Array.from(base.querySelectorAll(sel));
+            if (root.matches && root.matches(sel)) els.unshift(root);
+            return els;
+        }
+
         function forceCodeLTR(root) {
-            var sel = root.querySelectorAll ? root : document;
-            sel.querySelectorAll('pre, .code-block__code, .relative.group\\/copy').forEach(function(b) {
+            qsa(root, 'pre, .code-block__code, .relative.group\\/copy').forEach(function(b) {
                 b.dir = 'ltr'; b.style.textAlign = 'left'; b.style.unicodeBidi = 'embed';
             });
-            sel.querySelectorAll('code').forEach(function(c) {
+            qsa(root, 'code').forEach(function(c) {
                 if (!c.closest('pre') && !c.closest('.code-block__code')) c.dir = 'ltr';
             });
         }
 
         function processText(root) {
-            var sel = root.querySelectorAll ? root : document;
-
             // Standard text elements
-            sel.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, summary, label, dt, dd').forEach(function(el) {
+            qsa(root, 'p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, summary, label, dt, dd').forEach(function(el) {
                 if (el.closest(WRITING_SEL) || el.closest('pre') || el.closest('.code-block__code')) return;
                 var dir = detectElDir(el);
                 if (dir) {
                     el.dir = dir;
+                    el.style.direction = dir;
                     if (el.tagName === 'LI') {
                         el.style.listStylePosition = (dir === 'rtl') ? 'inside' : '';
                     }
                 } else {
                     if (el.hasAttribute('dir')) el.removeAttribute('dir');
+                    el.style.direction = '';
                     if (el.tagName === 'LI') el.style.listStylePosition = '';
                 }
             });
 
             // Lists
-            sel.querySelectorAll('ul, ol').forEach(function(el) {
+            qsa(root, 'ul, ol').forEach(function(el) {
                 if (el.closest(WRITING_SEL) || el.closest('pre')) return;
                 var dir = detectElDir(el);
                 if (dir === 'rtl') {
                     el.dir = 'rtl';
+                    el.style.direction = 'rtl';
                     var pl = getComputedStyle(el).paddingLeft;
                     if (parseFloat(pl) > 0) { el.style.paddingRight = pl; el.style.paddingLeft = '0'; }
                 } else {
                     if (el.hasAttribute('dir')) el.removeAttribute('dir');
+                    el.style.direction = '';
                     el.style.paddingRight = ''; el.style.paddingLeft = '';
                 }
             });
@@ -177,8 +186,7 @@ $RTL_INJECTION_CODE = @'
 
         // Universal: process ANY leaf text container (catches dialogs, tooltips, etc.)
         function processContainers(root) {
-            var sel = root.querySelectorAll ? root : document;
-            sel.querySelectorAll('div, span, button, a, label').forEach(function(el) {
+            qsa(root, 'div, span, button, a, label').forEach(function(el) {
                 if (el.closest('pre') || el.closest('code') || el.closest(WRITING_SEL)) return;
                 // Skip if has block children (not a leaf)
                 if (el.querySelector('p, ul, ol, h1, h2, h3, h4, h5, h6, pre, table')) return;
@@ -222,7 +230,8 @@ $RTL_INJECTION_CODE = @'
             s.textContent = [
                 'p,li,h1,h2,h3,h4,h5,h6,blockquote,td,th,summary,label,legend,dt,dd,figcaption,caption{unicode-bidi:plaintext!important;text-align:start!important}',
                 'pre,.code-block__code,.relative.group\\/copy{unicode-bidi:embed!important;direction:ltr!important;text-align:left!important}',
-                'code{unicode-bidi:isolate!important;direction:ltr!important}'
+                'code{unicode-bidi:isolate!important;direction:ltr!important}',
+                '[dir="rtl"]{direction:rtl!important}[dir="ltr"]{direction:ltr!important}'
             ].join('');
             document.head.appendChild(s);
         }
@@ -258,6 +267,16 @@ $RTL_INJECTION_CODE = @'
                         m.addedNodes.forEach(function(n) { if (n.nodeType === 1) roots.add(n); });
                         if (m.type === 'characterData' && m.target.parentElement) roots.add(m.target.parentElement);
                     });
+                    // Expand roots to include ancestor text/list elements
+                    var expanded = new Set(roots);
+                    roots.forEach(function(r) {
+                        if (!r.closest) return;
+                        var txt = r.closest('p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, summary, label, dt, dd');
+                        if (txt) expanded.add(txt);
+                        var list = r.closest('ul, ol');
+                        if (list) expanded.add(list);
+                    });
+                    roots = expanded;
                     if (roots.size > 0 && roots.size <= 30) {
                         roots.forEach(function(r) {
                             processText(r);
