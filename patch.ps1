@@ -42,74 +42,117 @@ $RTL_INJECTION_CODE = @'
     'use strict';
     if (typeof document === 'undefined') return;
     try {
-        const SELECTORS = {
-            WRITING: '[data-testid="chat-input"]'
-        };
+        var WRITING_SEL = '[data-testid="chat-input"]';
 
-        const RTL_RANGES = [
-            { start: 0x0590, end: 0x05FF },
-            { start: 0x0600, end: 0x06FF },
-            { start: 0x0750, end: 0x077F },
-            { start: 0x08A0, end: 0x08FF }
-        ];
-
-        function isRTLChar(char) {
-            const code = char.charCodeAt(0);
-            return RTL_RANGES.some(range => code >= range.start && code <= range.end);
+        function isRTL(c) {
+            var code = c.charCodeAt(0);
+            return (code >= 0x0590 && code <= 0x05FF) ||
+                   (code >= 0x0600 && code <= 0x06FF) ||
+                   (code >= 0x0750 && code <= 0x077F) ||
+                   (code >= 0x08A0 && code <= 0x08FF);
         }
 
-        function hasAnyRTL(text) {
+        function hasRTL(text) {
             if (!text) return false;
-            for (const char of text) {
-                if (isRTLChar(char)) return true;
-            }
+            for (var i = 0; i < text.length; i++) { if (isRTL(text[i])) return true; }
             return false;
         }
 
-        function shouldBeRTLText(text) {
-            if (!text) return false;
-            const trimmed = text.trim();
-            if (!trimmed) return false;
-            let firstStrongIsRTL = null;
-            let rtlCount = 0;
-            let ltrCount = 0;
-            for (const char of trimmed) {
-                if (isRTLChar(char)) {
-                    rtlCount++;
-                    if (firstStrongIsRTL === null) firstStrongIsRTL = true;
-                } else if (/\p{L}/u.test(char)) {
-                    ltrCount++;
-                    if (firstStrongIsRTL === null) firstStrongIsRTL = false;
+        // First strong character direction in a string
+        function firstStrong(text) {
+            if (!text) return null;
+            for (var i = 0; i < text.length; i++) {
+                if (isRTL(text[i])) return 'rtl';
+                if (/[a-zA-Z]/.test(text[i])) return 'ltr';
+            }
+            return null;
+        }
+
+        // Get text from element excluding <code> children (DOM-aware)
+        function textWithoutCode(el) {
+            var out = '';
+            var nodes = el.childNodes;
+            for (var i = 0; i < nodes.length; i++) {
+                var n = nodes[i];
+                if (n.nodeType === 3) { out += n.textContent; }
+                else if (n.nodeType === 1 && n.tagName !== 'CODE' && n.tagName !== 'PRE') {
+                    out += textWithoutCode(n);
                 }
             }
-            if (firstStrongIsRTL === null) return false;
-            if (firstStrongIsRTL) return true;
-            const totalLetters = rtlCount + ltrCount;
-            return totalLetters > 0 && (rtlCount / totalLetters) >= 0.5;
+            return out;
         }
 
-        function forceCodeBlocksLTR(root) {
-            root.querySelectorAll('pre, .code-block__code, .relative.group\\/copy').forEach(block => {
-                block.dir = 'ltr';
-                block.style.textAlign = 'left';
-                block.style.unicodeBidi = 'embed';
+        // Strip leading LTR-only patterns from plain text
+        // Removes: filenames (x.js), URLs, paths (a/b/c), backtick-code
+        function stripLeadingLTR(text) {
+            return text
+                .replace(/^[\s]*(?:[\w.\-]+\.[\w]{1,5})\s*/g, '')
+                .replace(/https?:\/\/\S+/g, '')
+                .replace(/[\w.\-]+[\/\\][\w.\-\/\\]+/g, '')
+                .replace(/`[^`]+`/g, '');
+        }
+
+        // --- HYBRID DIRECTION DETECTION ---
+
+        // For DOM elements (output): 3-layer detection
+        function detectElDir(el) {
+            var full = el.textContent || '';
+            if (!hasRTL(full)) return null;
+
+            // Layer 1: first-strong on text excluding <code> children
+            var noCode = textWithoutCode(el);
+            var d = firstStrong(noCode);
+            if (d === 'rtl') return 'rtl';
+
+            // Layer 2: strip leading filenames/URLs, then first-strong
+            var stripped = stripLeadingLTR(noCode);
+            d = firstStrong(stripped);
+            if (d === 'rtl') return 'rtl';
+
+            // Layer 3: there ARE RTL chars (we checked above) but they hide
+            // behind code/filenames. Since RTL exists, treat as RTL.
+            return 'rtl';
+        }
+
+        // For plain text (input box, dialogs without DOM structure)
+        function detectTextDir(text) {
+            if (!text || !text.trim()) return null;
+            var d = firstStrong(text);
+            if (d === 'rtl') return 'rtl';
+            if (!hasRTL(text)) return 'ltr';
+
+            // Has RTL but first-strong is LTR — strip patterns and retry
+            var stripped = stripLeadingLTR(text);
+            d = firstStrong(stripped);
+            if (d === 'rtl') return 'rtl';
+
+            // RTL chars exist somewhere → RTL
+            return 'rtl';
+        }
+
+        // --- ELEMENT PROCESSING ---
+
+        function forceCodeLTR(root) {
+            var sel = root.querySelectorAll ? root : document;
+            sel.querySelectorAll('pre, .code-block__code, .relative.group\\/copy').forEach(function(b) {
+                b.dir = 'ltr'; b.style.textAlign = 'left'; b.style.unicodeBidi = 'embed';
             });
-            root.querySelectorAll('code').forEach(function(code) {
-                if (!code.closest('pre') && !code.closest('.code-block__code')) {
-                    code.dir = 'ltr';
-                }
+            sel.querySelectorAll('code').forEach(function(c) {
+                if (!c.closest('pre') && !c.closest('.code-block__code')) c.dir = 'ltr';
             });
         }
 
-        function processTextElements(root) {
-            root.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, summary, label, dt, dd').forEach(el => {
-                if (el.closest(SELECTORS.WRITING) || el.closest('pre') || el.closest('.code-block__code')) return;
+        function processText(root) {
+            var sel = root.querySelectorAll ? root : document;
 
-                if (hasAnyRTL(el.textContent)) {
-                    el.dir = 'auto';
+            // Standard text elements
+            sel.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, summary, label, dt, dd').forEach(function(el) {
+                if (el.closest(WRITING_SEL) || el.closest('pre') || el.closest('.code-block__code')) return;
+                var dir = detectElDir(el);
+                if (dir) {
+                    el.dir = dir;
                     if (el.tagName === 'LI') {
-                        var computedDir = getComputedStyle(el).direction;
-                        el.style.listStylePosition = (computedDir === 'rtl') ? 'inside' : '';
+                        el.style.listStylePosition = (dir === 'rtl') ? 'inside' : '';
                     }
                 } else {
                     if (el.hasAttribute('dir')) el.removeAttribute('dir');
@@ -117,125 +160,123 @@ $RTL_INJECTION_CODE = @'
                 }
             });
 
-            root.querySelectorAll('ul, ol').forEach(el => {
-                if (el.closest(SELECTORS.WRITING) || el.closest('pre')) return;
-
-                if (hasAnyRTL(el.textContent)) {
-                    el.dir = 'auto';
-                    var computedDir = getComputedStyle(el).direction;
-                    if (computedDir === 'rtl') {
-                        var computedPL = getComputedStyle(el).paddingLeft;
-                        if (parseFloat(computedPL) > 0) {
-                            el.style.paddingRight = computedPL;
-                            el.style.paddingLeft = '0';
-                        }
-                    } else {
-                        el.style.paddingRight = '';
-                        el.style.paddingLeft = '';
-                    }
+            // Lists
+            sel.querySelectorAll('ul, ol').forEach(function(el) {
+                if (el.closest(WRITING_SEL) || el.closest('pre')) return;
+                var dir = detectElDir(el);
+                if (dir === 'rtl') {
+                    el.dir = 'rtl';
+                    var pl = getComputedStyle(el).paddingLeft;
+                    if (parseFloat(pl) > 0) { el.style.paddingRight = pl; el.style.paddingLeft = '0'; }
                 } else {
                     if (el.hasAttribute('dir')) el.removeAttribute('dir');
-                    el.style.paddingRight = '';
-                    el.style.paddingLeft = '';
+                    el.style.paddingRight = ''; el.style.paddingLeft = '';
                 }
             });
+        }
 
-            root.querySelectorAll('[role="dialog"] div, [role="dialog"] span, [role="alertdialog"] div, [role="alertdialog"] span, [data-radix-portal] div, [data-radix-portal] span').forEach(el => {
-                if (el.closest('pre') || el.closest('code') || el.closest(SELECTORS.WRITING)) return;
-                if (el.querySelector('div, p, ul, ol, h1, h2, h3, h4, h5, h6, pre, table')) return;
-                var text = el.textContent?.trim();
-                if (text && hasAnyRTL(text)) {
-                    el.dir = 'auto';
+        // Universal: process ANY leaf text container (catches dialogs, tooltips, etc.)
+        function processContainers(root) {
+            var sel = root.querySelectorAll ? root : document;
+            sel.querySelectorAll('div, span, button, a, label').forEach(function(el) {
+                if (el.closest('pre') || el.closest('code') || el.closest(WRITING_SEL)) return;
+                // Skip if has block children (not a leaf)
+                if (el.querySelector('p, ul, ol, h1, h2, h3, h4, h5, h6, pre, table')) return;
+                // Skip elements already handled by processText
+                if (/^(P|LI|H[1-6]|BLOCKQUOTE|TD|TH|UL|OL)$/.test(el.tagName)) return;
+                var text = (el.textContent || '').trim();
+                if (text.length < 2) return;
+                if (hasRTL(text)) {
+                    el.dir = detectTextDir(text) || 'rtl';
+                    el.style.textAlign = 'start';
                 } else if (el.hasAttribute('dir')) {
                     el.removeAttribute('dir');
+                    el.style.textAlign = '';
                 }
             });
         }
 
-        function processInputBox() {
-            var inputs = document.querySelectorAll(SELECTORS.WRITING);
-            inputs.forEach(function(input) {
+        function processInput() {
+            document.querySelectorAll(WRITING_SEL).forEach(function(input) {
                 var text = input.textContent || input.innerText || '';
-                if (shouldBeRTLText(text)) {
-                    input.style.direction = 'rtl';
-                    input.style.textAlign = 'right';
-                    input.style.paddingRight = '25px';
+                var dir = detectTextDir(text);
+                if (dir === 'rtl') {
+                    input.style.direction = 'rtl'; input.style.textAlign = 'right'; input.style.paddingRight = '25px';
                 } else {
-                    input.style.direction = 'ltr';
-                    input.style.textAlign = 'left';
-                    input.style.paddingRight = '';
+                    input.style.direction = 'ltr'; input.style.textAlign = 'left'; input.style.paddingRight = '';
                 }
             });
         }
 
-        function processElements() {
-            processTextElements(document);
-            processInputBox();
-            forceCodeBlocksLTR(document.body);
+        function processAll() {
+            processText(document);
+            processContainers(document.body);
+            processInput();
+            forceCodeLTR(document.body);
         }
 
-        function injectGlobalRTLStyles() {
-            if (document.getElementById('claude-rtl-global-styles')) return;
-            var style = document.createElement('style');
-            style.id = 'claude-rtl-global-styles';
-            style.textContent = 'p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, summary, label, legend, dt, dd, figcaption, caption { unicode-bidi: plaintext !important; text-align: start !important; } pre, .code-block__code, .relative.group\\/copy { unicode-bidi: embed !important; direction: ltr !important; text-align: left !important; } code { unicode-bidi: isolate !important; direction: ltr !important; }';
-            document.head.appendChild(style);
+        function injectStyles() {
+            if (document.getElementById('claude-rtl-styles')) return;
+            var s = document.createElement('style');
+            s.id = 'claude-rtl-styles';
+            s.textContent = [
+                'p,li,h1,h2,h3,h4,h5,h6,blockquote,td,th,summary,label,legend,dt,dd,figcaption,caption{unicode-bidi:plaintext!important;text-align:start!important}',
+                'pre,.code-block__code,.relative.group\\/copy{unicode-bidi:embed!important;direction:ltr!important;text-align:left!important}',
+                'code{unicode-bidi:isolate!important;direction:ltr!important}'
+            ].join('');
+            document.head.appendChild(s);
         }
 
         function init() {
-            injectGlobalRTLStyles();
-            processElements();
+            injectStyles();
+            processAll();
 
-            document.addEventListener('input', function(event) {
-                var target = event.target;
-                if (target && (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT' || target.isContentEditable)) {
-                    var currentText = target.textContent || target.innerText || target.value || '';
-                    if (shouldBeRTLText(currentText)) {
-                        target.style.direction = 'rtl';
-                        target.style.textAlign = 'right';
-                        target.style.paddingRight = '25px';
-                    } else {
-                        target.style.direction = 'ltr';
-                        target.style.textAlign = 'left';
-                        target.style.paddingRight = '';
-                    }
+            // Input box live direction switching
+            document.addEventListener('input', function(e) {
+                var t = e.target;
+                if (!t || !(t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable)) return;
+                var text = t.textContent || t.innerText || t.value || '';
+                var dir = detectTextDir(text);
+                if (dir === 'rtl') {
+                    t.style.direction = 'rtl'; t.style.textAlign = 'right'; t.style.paddingRight = '25px';
+                } else {
+                    t.style.direction = 'ltr'; t.style.textAlign = 'left'; t.style.paddingRight = '';
                 }
             }, true);
 
-            var observer = new MutationObserver(function(mutations) {
-                var hasChanges = mutations.some(function(m) {
-                    return m.addedNodes.length > 0 || m.type === 'characterData';
-                });
-                if (hasChanges) {
-                    clearTimeout(window._rtlProcessTimeout);
-                    window._rtlProcessTimeout = setTimeout(function() {
-                        var roots = new Set();
-                        mutations.forEach(function(m) {
-                            m.addedNodes.forEach(function(n) { if (n.nodeType === 1) roots.add(n); });
-                            if (m.type === 'characterData' && m.target.parentElement) roots.add(m.target.parentElement);
-                        });
-                        if (roots.size > 0 && roots.size <= 20) {
-                            roots.forEach(function(root) {
-                                processTextElements(root);
-                                forceCodeBlocksLTR(root);
-                            });
-                            processInputBox();
-                        } else {
-                            processElements();
-                        }
-                    }, 50);
+            // Watch DOM changes
+            var obs = new MutationObserver(function(muts) {
+                var changed = false;
+                for (var i = 0; i < muts.length; i++) {
+                    if (muts[i].addedNodes.length > 0 || muts[i].type === 'characterData') { changed = true; break; }
                 }
+                if (!changed) return;
+                clearTimeout(window._rtlT);
+                window._rtlT = setTimeout(function() {
+                    var roots = new Set();
+                    muts.forEach(function(m) {
+                        m.addedNodes.forEach(function(n) { if (n.nodeType === 1) roots.add(n); });
+                        if (m.type === 'characterData' && m.target.parentElement) roots.add(m.target.parentElement);
+                    });
+                    if (roots.size > 0 && roots.size <= 30) {
+                        roots.forEach(function(r) {
+                            processText(r);
+                            processContainers(r);
+                            forceCodeLTR(r);
+                        });
+                        processInput();
+                    } else {
+                        processAll();
+                    }
+                }, 50);
             });
-
-            observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+            obs.observe(document.body, { childList: true, subtree: true, characterData: true });
         }
 
         if (document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', init);
-        } else {
-            init();
-        }
-    } catch(e) { console.error("[Claude RTL Error]", e); }
+        } else { init(); }
+    } catch(e) { console.error('[Claude RTL]', e); }
 })();
 // --- CLAUDE RTL PATCH END ---
 '@
