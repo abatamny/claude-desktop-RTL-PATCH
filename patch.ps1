@@ -582,11 +582,12 @@ function Install-Patch {
             $JsFiles = Get-ChildItem -Path $BuildDir -Filter "*.js" -Recurse
             $Injected = 0
             foreach ($file in $JsFiles) {
-                $content = Get-Content $file.FullName -Raw
+                $content = [System.IO.File]::ReadAllText($file.FullName, [System.Text.Encoding]::UTF8)
                 if ($content -match "CLAUDE RTL PATCH START") { continue }
 
                 $newContent = $RTL_INJECTION_CODE + "`n" + $content
-                [System.IO.File]::WriteAllText($file.FullName, $newContent, [System.Text.Encoding]::UTF8)
+                $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+                [System.IO.File]::WriteAllText($file.FullName, $newContent, $utf8NoBom)
                 $Injected++
                 Write-Log "Injected RTL into: $($file.Name)"
             }
