@@ -342,27 +342,13 @@ $RTL_INJECTION_CODE = @'
             }
         }
 
-        // Find the top bar container by physical position, not by tag/class/role.
-        // Criteria: anchored at top-left, spanning most of viewport width.
-        function findTopBar(overlayWidth, overlayHeight) {
-            // Test point: just PAST the overlay area, at the title bar's vertical center.
-            // That's where claude.ai's actual top bar content sits.
-            var testX = Math.min(overlayWidth + 20, window.innerWidth - 20);
-            var testY = Math.max(2, Math.min(overlayHeight / 2, 15));
-            var hit = document.elementFromPoint(testX, testY);
-            if (!hit) return null;
-
-            // Walk up: find the WIDEST ancestor still anchored at top-left.
-            var el = hit;
-            var best = null;
-            while (el && el !== document.body && el !== document.documentElement) {
-                var r = el.getBoundingClientRect();
-                if (r.top <= 4 && r.left <= 4 && r.width >= window.innerWidth * 0.7) {
-                    best = el; // Keep walking — prefer a wider qualifying ancestor
-                }
-                el = el.parentElement;
-            }
-            return best;
+        // The title bar is the element Electron marks as the OS drag region.
+        // In Claude Desktop it's always the element with class `draggable` (as
+        // opposed to `draggable-none`, which marks non-drag subregions).
+        // Padding on this overlay moves only the title-bar buttons, not the
+        // app body — which is exactly what we want.
+        function findTopBar() {
+            return document.querySelector('.draggable:not(.draggable-none)');
         }
 
         function applyFix() {
@@ -393,7 +379,7 @@ $RTL_INJECTION_CODE = @'
 
                 window.__claudeWCOState = { source: source, padStart: padStart, rect: rect, locale: locale, visible: wco ? wco.visible : null };
 
-                var topBar = findTopBar(padStart, height);
+                var topBar = findTopBar();
                 if (!topBar) return false; // Signal caller to retry later
 
                 // Clear stale markers (previous target may have unmounted), mark fresh one.
@@ -502,19 +488,12 @@ $RTL_INJECTION_CODE = @'
             bar.innerHTML =
                 '<span style="font-size:18px">\u2713</span>' +
                 '<span style="flex:1">\u05d4\u05e4\u05d0\u05d8\u05e5\' \u05d4\u05d5\u05d7\u05dc \u05d1\u05d4\u05e6\u05dc\u05d7\u05d4 \u2014 \u05ea\u05de\u05d9\u05db\u05ea RTL \u05d5\u05ea\u05d9\u05e7\u05d5\u05df \u05db\u05e4\u05ea\u05d5\u05e8\u05d9 \u05d4\u05d7\u05dc\u05d5\u05df \u05e4\u05e2\u05d9\u05dc\u05d9\u05dd.</span>' +
-                '<button id="claude-rtl-banner-diag" style="background:#2a2a2a;color:#fff;border:1px solid #444;border-radius:6px;padding:4px 10px;cursor:pointer;font:13px system-ui">\u05d3\u05d9\u05d0\u05d2\u05e0\u05d5\u05e1\u05d8\u05d9\u05e7\u05d4</button>' +
                 '<button id="claude-rtl-banner-close" style="background:transparent;color:#aaa;border:0;font-size:20px;cursor:pointer;padding:0 4px" aria-label="close">\u00d7</button>';
             document.body.appendChild(bar);
 
             document.getElementById('claude-rtl-banner-close').onclick = function() {
                 localStorage.setItem(FLAG_KEY, VERSION);
                 bar.remove();
-            };
-            document.getElementById('claude-rtl-banner-diag').onclick = function() {
-                localStorage.setItem(FLAG_KEY, VERSION);
-                localStorage.setItem('claude-wco-debug', '1');
-                bar.remove();
-                if (typeof window.__claudeWCOOpenDiag === 'function') window.__claudeWCOOpenDiag();
             };
         }
 
@@ -524,180 +503,6 @@ $RTL_INJECTION_CODE = @'
     } catch(e) { console.error('[Claude Welcome Banner]', e); }
 })();
 // --- CLAUDE PATCH WELCOME BANNER END ---
-
-// --- CLAUDE WCO DIAG PANEL START ---
-;(function() {
-    'use strict';
-    try {
-        if (typeof document === 'undefined') return;
-        var PANEL_ID = 'claude-wco-diag-panel';
-        var FLAG = 'claude-wco-debug';
-
-        // Capture the top 60px of the viewport + ancestor chains. Sanitized so the
-        // resulting JSON stays compact enough to paste into a chat.
-        function captureTopRegion() {
-            var out = {
-                viewport: { w: innerWidth, h: innerHeight, dpr: devicePixelRatio },
-                state: window.__claudeWCOState || null,
-                samples: []
-            };
-            var seen = new Set();
-            var ys = [5, 15, 25, 40];
-            for (var xi = 10; xi < innerWidth; xi += 60) {
-                for (var yi = 0; yi < ys.length; yi++) {
-                    var el = document.elementFromPoint(xi, ys[yi]);
-                    if (!el || seen.has(el)) continue;
-                    seen.add(el);
-                    var chain = [], cur = el, depth = 0;
-                    while (cur && cur !== document.documentElement && depth < 8) {
-                        var r = cur.getBoundingClientRect();
-                        var cs = getComputedStyle(cur);
-                        chain.push({
-                            tag: cur.tagName,
-                            id: cur.id || null,
-                            cls: (cur.className && cur.className.toString) ? cur.className.toString().slice(0, 120) : null,
-                            role: cur.getAttribute ? cur.getAttribute('role') : null,
-                            aria: cur.getAttribute ? cur.getAttribute('aria-label') : null,
-                            dragRegion: cs.getPropertyValue('-webkit-app-region') || null,
-                            pos: cs.position,
-                            rect: { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) },
-                            style: ((cur.getAttribute && cur.getAttribute('style')) || '').slice(0, 200) || null
-                        });
-                        cur = cur.parentElement; depth++;
-                    }
-                    out.samples.push({ point: [xi, ys[yi]], chain: chain });
-                }
-            }
-            return out;
-        }
-
-        function collectDiagnostics() {
-            var wco = navigator.windowControlsOverlay;
-            var rect = (wco && wco.getTitlebarAreaRect) ? wco.getTitlebarAreaRect() : null;
-            var t = document.querySelector('[data-claude-wco-target]');
-            var tInfo = null;
-            if (t) {
-                var r = t.getBoundingClientRect();
-                tInfo = {
-                    tag: t.tagName,
-                    id: t.id || null,
-                    cls: ((t.className || '') + '').slice(0, 120),
-                    rect: { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) },
-                    computedPadInlineStart: getComputedStyle(t).paddingInlineStart
-                };
-            }
-            return {
-                generatedAt: new Date().toISOString(),
-                userAgent: navigator.userAgent,
-                locale: navigator.language,
-                locales: navigator.languages,
-                documentDir: document.documentElement.dir,
-                bodyDir: document.body ? document.body.dir : null,
-                wco: {
-                    apiPresent: 'windowControlsOverlay' in navigator,
-                    visible: wco ? wco.visible : null,
-                    rect: rect ? { x: rect.x, y: rect.y, w: rect.width, h: rect.height } : null
-                },
-                patchState: window.__claudeWCOState || null,
-                target: tInfo,
-                viewport: { w: innerWidth, h: innerHeight, dpr: devicePixelRatio }
-            };
-        }
-
-        function copyText(text) {
-            if (navigator.clipboard && navigator.clipboard.writeText) {
-                return navigator.clipboard.writeText(text);
-            }
-            var ta = document.createElement('textarea');
-            ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
-            document.body.appendChild(ta); ta.select();
-            try { document.execCommand('copy'); } catch(e) {}
-            ta.remove();
-            return Promise.resolve();
-        }
-
-        function flash(btn, ok) {
-            var orig = btn.textContent;
-            btn.textContent = ok ? '\u2713 \u05d4\u05d5\u05e2\u05ea\u05e7' : '\u2717 \u05db\u05e9\u05dc';
-            setTimeout(function(){ btn.textContent = orig; }, 1500);
-        }
-
-        function render() {
-            var old = document.getElementById(PANEL_ID);
-            if (old) old.remove();
-
-            var d = collectDiagnostics();
-            var p = document.createElement('div');
-            p.id = PANEL_ID;
-            p.dir = 'ltr';
-            p.style.cssText = [
-                'position:fixed', 'top:12px', 'right:12px',
-                'z-index:2147483646',
-                'background:#0f0f0f', 'color:#e6e6e6',
-                'border:1px solid #333', 'border-radius:10px',
-                'padding:10px 12px', 'font:12px/1.5 ui-monospace,Menlo,Consolas,monospace',
-                'box-shadow:0 6px 20px rgba(0,0,0,.5)',
-                'max-width:380px', 'max-height:70vh', 'overflow:auto'
-            ].join(';');
-
-            var header = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><b style="color:#7fd1ff">Claude Patch Diagnostics</b><button id="wcod-x" style="background:transparent;color:#aaa;border:0;font-size:16px;cursor:pointer">\u00d7</button></div>';
-            var lines = [
-                '<div><b>API:</b> ' + (d.wco.apiPresent ? 'yes' : 'NO') + '</div>',
-                '<div><b>visible:</b> ' + (d.wco.visible === null ? 'n/a' : String(d.wco.visible)) + '</div>',
-                '<div><b>rect:</b> ' + (d.wco.rect ? JSON.stringify(d.wco.rect) : 'null') + '</div>',
-                '<div><b>locale:</b> ' + (d.locale || '') + '</div>',
-                '<div><b>state:</b> ' + (d.patchState ? (d.patchState.source + ' pad=' + (d.patchState.padStart || '-')) : 'n/a') + '</div>',
-                '<div><b>target:</b> ' + (d.target ? (d.target.tag + ' ' + JSON.stringify(d.target.rect) + ' padIS=' + d.target.computedPadInlineStart) : 'none') + '</div>'
-            ].join('');
-            var btns = '<div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">' +
-                '<button id="wcod-diag" style="background:#1e3a5f;color:#fff;border:0;border-radius:4px;padding:5px 10px;cursor:pointer;font:12px ui-monospace">Copy diagnostics</button>' +
-                '<button id="wcod-dom" style="background:#1e3a5f;color:#fff;border:0;border-radius:4px;padding:5px 10px;cursor:pointer;font:12px ui-monospace">Copy top-region DOM</button>' +
-                '<button id="wcod-refresh" style="background:#444;color:#fff;border:0;border-radius:4px;padding:5px 10px;cursor:pointer;font:12px ui-monospace">Refresh</button>' +
-                '<button id="wcod-off" style="background:#4a1e1e;color:#fff;border:0;border-radius:4px;padding:5px 10px;cursor:pointer;font:12px ui-monospace">Disable panel</button>' +
-                '</div>';
-            p.innerHTML = header + lines + btns;
-            document.body.appendChild(p);
-
-            document.getElementById('wcod-x').onclick = function(){ p.remove(); };
-            document.getElementById('wcod-refresh').onclick = render;
-            document.getElementById('wcod-off').onclick = function(){ localStorage.removeItem(FLAG); p.remove(); };
-            document.getElementById('wcod-diag').onclick = function(ev) {
-                copyText(JSON.stringify(collectDiagnostics(), null, 2))
-                    .then(function(){ flash(ev.target, true); })
-                    .catch(function(){ flash(ev.target, false); });
-            };
-            document.getElementById('wcod-dom').onclick = function(ev) {
-                copyText(JSON.stringify(captureTopRegion(), null, 2))
-                    .then(function(){ flash(ev.target, true); })
-                    .catch(function(){ flash(ev.target, false); });
-            };
-        }
-
-        window.__claudeWCOOpenDiag = function() {
-            localStorage.setItem(FLAG, '1');
-            if (document.body) render();
-            else document.addEventListener('DOMContentLoaded', render);
-        };
-
-        function maybeShow() {
-            if (localStorage.getItem(FLAG) === '1') render();
-        }
-
-        // Ctrl+Shift+D opens the panel (and sets the flag so a refresh keeps it).
-        document.addEventListener('keydown', function(e) {
-            if (e.ctrlKey && e.shiftKey && (e.key === 'D' || e.key === 'd')) {
-                localStorage.setItem(FLAG, '1');
-                render();
-                e.preventDefault();
-            }
-        });
-
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', maybeShow);
-        } else { maybeShow(); }
-    } catch(e) { console.error('[Claude WCO Diag]', e); }
-})();
-// --- CLAUDE WCO DIAG PANEL END ---
 '@
 
 # -----------------------------------------------------------------------------
