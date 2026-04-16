@@ -317,10 +317,16 @@ $RTL_INJECTION_CODE = @'
     'use strict';
     try {
         if (typeof navigator === 'undefined' || typeof document === 'undefined') return;
-        // Feature-detect. If Anthropic ships a native fix (disables titleBarOverlay
-        // or handles padding themselves), this whole block becomes a silent no-op.
-        if (!('windowControlsOverlay' in navigator)) return;
-        var wco = navigator.windowControlsOverlay;
+        // Feature-detect + locale fallback. If the WCO API isn't available and the
+        // OS locale is LTR, this whole block becomes a silent no-op.
+        var wco = ('windowControlsOverlay' in navigator) ? navigator.windowControlsOverlay : null;
+        var locale = ((navigator.language || '') + ',' + (navigator.languages || []).join(',')).toLowerCase();
+        var LOCALE_IS_RTL = /\b(he|iw|ar|fa|ur|yi|ps|sd)\b/.test(locale);
+        var FALLBACK_PAD_PX = 140; // Default Windows titleBarOverlay width at 100% DPI
+        if (!wco && !LOCALE_IS_RTL) {
+            window.__claudeWCOState = { source: 'none', reason: 'no-api-and-ltr-locale', locale: locale };
+            return;
+        }
 
         var STYLE_ID = 'claude-wco-fix';
         var TARGET_ATTR = 'data-claude-wco-target';
@@ -361,16 +367,31 @@ $RTL_INJECTION_CODE = @'
 
         function applyFix() {
             try {
-                var rect = (typeof wco.getTitlebarAreaRect === 'function')
+                var rect = (wco && typeof wco.getTitlebarAreaRect === 'function')
                     ? wco.getTitlebarAreaRect() : null;
 
-                // No-op cases: overlay not visible, no rect, or x <= 0 (LTR Windows).
-                if (!wco.visible || !rect || rect.width === 0 || rect.x <= 0) {
+                var padStart = 0;
+                var source = 'none';
+                var height = 0;
+
+                if (wco && wco.visible && rect && rect.width !== 0 && rect.x > 0) {
+                    padStart = Math.round(rect.x);
+                    height = Math.round(rect.height) || 40;
+                    source = 'wco-api';
+                } else if (LOCALE_IS_RTL) {
+                    // Fallback: WCO API unavailable or not reporting left-side controls,
+                    // but the OS locale is RTL — apply a conservative default padding.
+                    padStart = FALLBACK_PAD_PX;
+                    height = 40;
+                    source = 'locale-fallback';
+                } else {
+                    // True no-op case: LTR locale and either no API or overlay on right.
+                    window.__claudeWCOState = { source: 'none', reason: 'ltr-or-right-controls', rect: rect, locale: locale };
                     removeAll();
                     return true;
                 }
-                var padStart = Math.round(rect.x);
-                var height = Math.round(rect.height) || 40;
+
+                window.__claudeWCOState = { source: source, padStart: padStart, rect: rect, locale: locale, visible: wco ? wco.visible : null };
 
                 var topBar = findTopBar(padStart, height);
                 if (!topBar) return false; // Signal caller to retry later
@@ -411,8 +432,16 @@ $RTL_INJECTION_CODE = @'
             scheduleAttempt();
 
             // Chromium fires geometrychange on maximize/restore/DPI change.
-            if (typeof wco.addEventListener === 'function') {
+            if (wco && typeof wco.addEventListener === 'function') {
                 wco.addEventListener('geometrychange', function() {
+                    retryCount = 0;
+                    applyFix();
+                });
+            }
+            // In locale-fallback mode we have no geometrychange event — listen
+            // for window resize as a proxy. Cheap, fires rarely.
+            if (!wco && LOCALE_IS_RTL) {
+                window.addEventListener('resize', function() {
                     retryCount = 0;
                     applyFix();
                 });
@@ -444,6 +473,231 @@ $RTL_INJECTION_CODE = @'
     } catch(e) { console.error('[Claude WCO Fix]', e); }
 })();
 // --- CLAUDE WCO FIX END ---
+
+// --- CLAUDE PATCH WELCOME BANNER START ---
+;(function() {
+    'use strict';
+    try {
+        if (typeof document === 'undefined' || typeof localStorage === 'undefined') return;
+        var FLAG_KEY = 'claude-rtl-patch-welcomed';
+        var VERSION = '1'; // Bump to re-show on future patch updates
+        if (localStorage.getItem(FLAG_KEY) === VERSION) return;
+
+        function show() {
+            if (!document.body || document.getElementById('claude-rtl-welcome-banner')) return;
+            var bar = document.createElement('div');
+            bar.id = 'claude-rtl-welcome-banner';
+            bar.dir = 'rtl';
+            bar.style.cssText = [
+                'position:fixed', 'top:12px', 'left:50%',
+                'transform:translateX(-50%)',
+                'z-index:2147483647',
+                'background:#1f1f1f', 'color:#fff',
+                'border:1px solid #3a3a3a', 'border-radius:10px',
+                'padding:10px 14px', 'font:14px/1.4 system-ui,sans-serif',
+                'box-shadow:0 6px 20px rgba(0,0,0,.4)',
+                'display:flex', 'gap:12px', 'align-items:center',
+                'max-width:560px'
+            ].join(';');
+            bar.innerHTML =
+                '<span style="font-size:18px">\u2713</span>' +
+                '<span style="flex:1">\u05d4\u05e4\u05d0\u05d8\u05e5\' \u05d4\u05d5\u05d7\u05dc \u05d1\u05d4\u05e6\u05dc\u05d7\u05d4 \u2014 \u05ea\u05de\u05d9\u05db\u05ea RTL \u05d5\u05ea\u05d9\u05e7\u05d5\u05df \u05db\u05e4\u05ea\u05d5\u05e8\u05d9 \u05d4\u05d7\u05dc\u05d5\u05df \u05e4\u05e2\u05d9\u05dc\u05d9\u05dd.</span>' +
+                '<button id="claude-rtl-banner-diag" style="background:#2a2a2a;color:#fff;border:1px solid #444;border-radius:6px;padding:4px 10px;cursor:pointer;font:13px system-ui">\u05d3\u05d9\u05d0\u05d2\u05e0\u05d5\u05e1\u05d8\u05d9\u05e7\u05d4</button>' +
+                '<button id="claude-rtl-banner-close" style="background:transparent;color:#aaa;border:0;font-size:20px;cursor:pointer;padding:0 4px" aria-label="close">\u00d7</button>';
+            document.body.appendChild(bar);
+
+            document.getElementById('claude-rtl-banner-close').onclick = function() {
+                localStorage.setItem(FLAG_KEY, VERSION);
+                bar.remove();
+            };
+            document.getElementById('claude-rtl-banner-diag').onclick = function() {
+                localStorage.setItem(FLAG_KEY, VERSION);
+                localStorage.setItem('claude-wco-debug', '1');
+                bar.remove();
+                if (typeof window.__claudeWCOOpenDiag === 'function') window.__claudeWCOOpenDiag();
+            };
+        }
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', show);
+        } else { show(); }
+    } catch(e) { console.error('[Claude Welcome Banner]', e); }
+})();
+// --- CLAUDE PATCH WELCOME BANNER END ---
+
+// --- CLAUDE WCO DIAG PANEL START ---
+;(function() {
+    'use strict';
+    try {
+        if (typeof document === 'undefined') return;
+        var PANEL_ID = 'claude-wco-diag-panel';
+        var FLAG = 'claude-wco-debug';
+
+        // Capture the top 60px of the viewport + ancestor chains. Sanitized so the
+        // resulting JSON stays compact enough to paste into a chat.
+        function captureTopRegion() {
+            var out = {
+                viewport: { w: innerWidth, h: innerHeight, dpr: devicePixelRatio },
+                state: window.__claudeWCOState || null,
+                samples: []
+            };
+            var seen = new Set();
+            var ys = [5, 15, 25, 40];
+            for (var xi = 10; xi < innerWidth; xi += 60) {
+                for (var yi = 0; yi < ys.length; yi++) {
+                    var el = document.elementFromPoint(xi, ys[yi]);
+                    if (!el || seen.has(el)) continue;
+                    seen.add(el);
+                    var chain = [], cur = el, depth = 0;
+                    while (cur && cur !== document.documentElement && depth < 8) {
+                        var r = cur.getBoundingClientRect();
+                        var cs = getComputedStyle(cur);
+                        chain.push({
+                            tag: cur.tagName,
+                            id: cur.id || null,
+                            cls: (cur.className && cur.className.toString) ? cur.className.toString().slice(0, 120) : null,
+                            role: cur.getAttribute ? cur.getAttribute('role') : null,
+                            aria: cur.getAttribute ? cur.getAttribute('aria-label') : null,
+                            dragRegion: cs.getPropertyValue('-webkit-app-region') || null,
+                            pos: cs.position,
+                            rect: { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) },
+                            style: ((cur.getAttribute && cur.getAttribute('style')) || '').slice(0, 200) || null
+                        });
+                        cur = cur.parentElement; depth++;
+                    }
+                    out.samples.push({ point: [xi, ys[yi]], chain: chain });
+                }
+            }
+            return out;
+        }
+
+        function collectDiagnostics() {
+            var wco = navigator.windowControlsOverlay;
+            var rect = (wco && wco.getTitlebarAreaRect) ? wco.getTitlebarAreaRect() : null;
+            var t = document.querySelector('[data-claude-wco-target]');
+            var tInfo = null;
+            if (t) {
+                var r = t.getBoundingClientRect();
+                tInfo = {
+                    tag: t.tagName,
+                    id: t.id || null,
+                    cls: ((t.className || '') + '').slice(0, 120),
+                    rect: { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) },
+                    computedPadInlineStart: getComputedStyle(t).paddingInlineStart
+                };
+            }
+            return {
+                generatedAt: new Date().toISOString(),
+                userAgent: navigator.userAgent,
+                locale: navigator.language,
+                locales: navigator.languages,
+                documentDir: document.documentElement.dir,
+                bodyDir: document.body ? document.body.dir : null,
+                wco: {
+                    apiPresent: 'windowControlsOverlay' in navigator,
+                    visible: wco ? wco.visible : null,
+                    rect: rect ? { x: rect.x, y: rect.y, w: rect.width, h: rect.height } : null
+                },
+                patchState: window.__claudeWCOState || null,
+                target: tInfo,
+                viewport: { w: innerWidth, h: innerHeight, dpr: devicePixelRatio }
+            };
+        }
+
+        function copyText(text) {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                return navigator.clipboard.writeText(text);
+            }
+            var ta = document.createElement('textarea');
+            ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+            document.body.appendChild(ta); ta.select();
+            try { document.execCommand('copy'); } catch(e) {}
+            ta.remove();
+            return Promise.resolve();
+        }
+
+        function flash(btn, ok) {
+            var orig = btn.textContent;
+            btn.textContent = ok ? '\u2713 \u05d4\u05d5\u05e2\u05ea\u05e7' : '\u2717 \u05db\u05e9\u05dc';
+            setTimeout(function(){ btn.textContent = orig; }, 1500);
+        }
+
+        function render() {
+            var old = document.getElementById(PANEL_ID);
+            if (old) old.remove();
+
+            var d = collectDiagnostics();
+            var p = document.createElement('div');
+            p.id = PANEL_ID;
+            p.dir = 'ltr';
+            p.style.cssText = [
+                'position:fixed', 'top:12px', 'right:12px',
+                'z-index:2147483646',
+                'background:#0f0f0f', 'color:#e6e6e6',
+                'border:1px solid #333', 'border-radius:10px',
+                'padding:10px 12px', 'font:12px/1.5 ui-monospace,Menlo,Consolas,monospace',
+                'box-shadow:0 6px 20px rgba(0,0,0,.5)',
+                'max-width:380px', 'max-height:70vh', 'overflow:auto'
+            ].join(';');
+
+            var header = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><b style="color:#7fd1ff">Claude Patch Diagnostics</b><button id="wcod-x" style="background:transparent;color:#aaa;border:0;font-size:16px;cursor:pointer">\u00d7</button></div>';
+            var lines = [
+                '<div><b>API:</b> ' + (d.wco.apiPresent ? 'yes' : 'NO') + '</div>',
+                '<div><b>visible:</b> ' + (d.wco.visible === null ? 'n/a' : String(d.wco.visible)) + '</div>',
+                '<div><b>rect:</b> ' + (d.wco.rect ? JSON.stringify(d.wco.rect) : 'null') + '</div>',
+                '<div><b>locale:</b> ' + (d.locale || '') + '</div>',
+                '<div><b>state:</b> ' + (d.patchState ? (d.patchState.source + ' pad=' + (d.patchState.padStart || '-')) : 'n/a') + '</div>',
+                '<div><b>target:</b> ' + (d.target ? (d.target.tag + ' ' + JSON.stringify(d.target.rect) + ' padIS=' + d.target.computedPadInlineStart) : 'none') + '</div>'
+            ].join('');
+            var btns = '<div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">' +
+                '<button id="wcod-diag" style="background:#1e3a5f;color:#fff;border:0;border-radius:4px;padding:5px 10px;cursor:pointer;font:12px ui-monospace">Copy diagnostics</button>' +
+                '<button id="wcod-dom" style="background:#1e3a5f;color:#fff;border:0;border-radius:4px;padding:5px 10px;cursor:pointer;font:12px ui-monospace">Copy top-region DOM</button>' +
+                '<button id="wcod-refresh" style="background:#444;color:#fff;border:0;border-radius:4px;padding:5px 10px;cursor:pointer;font:12px ui-monospace">Refresh</button>' +
+                '<button id="wcod-off" style="background:#4a1e1e;color:#fff;border:0;border-radius:4px;padding:5px 10px;cursor:pointer;font:12px ui-monospace">Disable panel</button>' +
+                '</div>';
+            p.innerHTML = header + lines + btns;
+            document.body.appendChild(p);
+
+            document.getElementById('wcod-x').onclick = function(){ p.remove(); };
+            document.getElementById('wcod-refresh').onclick = render;
+            document.getElementById('wcod-off').onclick = function(){ localStorage.removeItem(FLAG); p.remove(); };
+            document.getElementById('wcod-diag').onclick = function(ev) {
+                copyText(JSON.stringify(collectDiagnostics(), null, 2))
+                    .then(function(){ flash(ev.target, true); })
+                    .catch(function(){ flash(ev.target, false); });
+            };
+            document.getElementById('wcod-dom').onclick = function(ev) {
+                copyText(JSON.stringify(captureTopRegion(), null, 2))
+                    .then(function(){ flash(ev.target, true); })
+                    .catch(function(){ flash(ev.target, false); });
+            };
+        }
+
+        window.__claudeWCOOpenDiag = function() {
+            localStorage.setItem(FLAG, '1');
+            if (document.body) render();
+            else document.addEventListener('DOMContentLoaded', render);
+        };
+
+        function maybeShow() {
+            if (localStorage.getItem(FLAG) === '1') render();
+        }
+
+        // Ctrl+Shift+D opens the panel (and sets the flag so a refresh keeps it).
+        document.addEventListener('keydown', function(e) {
+            if (e.ctrlKey && e.shiftKey && (e.key === 'D' || e.key === 'd')) {
+                localStorage.setItem(FLAG, '1');
+                render();
+                e.preventDefault();
+            }
+        });
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', maybeShow);
+        } else { maybeShow(); }
+    } catch(e) { console.error('[Claude WCO Diag]', e); }
+})();
+// --- CLAUDE WCO DIAG PANEL END ---
 '@
 
 # -----------------------------------------------------------------------------
