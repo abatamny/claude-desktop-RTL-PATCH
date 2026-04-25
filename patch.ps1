@@ -1220,15 +1220,25 @@ function Install-Patch {
             if ($SignResult2.Status -eq 'Valid') { Write-Success "Successfully re-signed cowork-svc.exe" }
             else { throw "Re-signing cowork-svc.exe failed: $($SignResult2.Status)" }
 
+            # 7. WIPE PRIVATE KEY: public cert stays in Root for verification, but the
+            # private key is no longer needed and would let an admin-level attacker
+            # sign additional binaries that Windows would auto-trust.
+            Try {
+                Get-ChildItem "Cert:\LocalMachine\My\$($Cert.Thumbprint)" -ErrorAction Stop |
+                    Remove-Item -DeleteKey -Force -ErrorAction Stop
+                Write-Success "Private signing key wiped from My store (Root cert retained)"
+            } Catch {
+                Write-Warn "Could not delete private key: $($_.Exception.Message)"
+            }
+
         } else {
             Write-Warn "claude.exe or cowork-svc.exe not found. Binary patching skipped."
         }
 
         Write-Step "Cleanup & Launch"
         if (Test-Path $global:TmpDir) { Remove-Item $global:TmpDir -Recurse -Force }
-        Start-ClaudeServices
-        
         Save-PatchState -InstallPath $ClaudeDir
+        Start-ClaudeServices
 
         Write-Host "`n=======================================================" -ForegroundColor Green
         Write-Host " PATCH INSTALLATION COMPLETED SUCCESSFULLY! ENJOY!" -ForegroundColor Green
