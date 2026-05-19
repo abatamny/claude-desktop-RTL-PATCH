@@ -1,6 +1,8 @@
-# Claude Desktop RTL Patch
+# Claude Desktop RTL Patch (abatamny fork)
 
 Smart RTL (Right-to-Left) support for **Claude Desktop on Windows**. Adds automatic Hebrew/Arabic text direction detection without breaking English or code blocks.
+
+> **This is a fork of [shraga100/claude-desktop-rtl-patch](https://github.com/shraga100/claude-desktop-rtl-patch).** All the credit for the original patch, the ASAR injection workflow, the executable hash replacement, and the certificate-swap technique goes to the upstream project. This fork adds a fix to the RTL detection logic so that mostly-English text is no longer flipped to RTL because of a single Hebrew or Arabic character. See [What's different in this fork](#whats-different-in-this-fork) below.
 
 ## What it does
 
@@ -12,11 +14,52 @@ Smart RTL (Right-to-Left) support for **Claude Desktop on Windows**. Adds automa
 
 * **Automated Updates** — Optional background service to automatically re-apply the patch when Claude updates
 
+## What's different in this fork
+
+This fork is built directly on top of [shraga100/claude-desktop-rtl-patch](https://github.com/shraga100/claude-desktop-rtl-patch). The install flow, the ASAR injection, the executable hash patch, and the certificate swap are all unchanged. The only meaningful change is a fix to the direction-detection logic inside the injected JavaScript.
+
+### The problem in the original patch
+
+The original direction-detection functions (`detectElDir` for DOM elements and `detectTextDir` for plain text) both ended with the same hardcoded fallback:
+
+```javascript
+return 'rtl'; // blind fallback
+```
+
+That fallback fires whenever the text contains at least one RTL character but the earlier detection layers (first-strong character, stripping leading filenames/URLs) didn't reach a clear verdict. In practice this caused a very common bug:
+
+* An English sentence that happens to contain a single Hebrew or Arabic word, name, or quotation mark would be flipped to RTL.
+* Long English paragraphs with one Hebrew character anywhere in them — even buried in the middle — were rendered right-aligned and mirrored.
+* Code-like content, log lines, or filenames that contained a single Arabic letter would lose their LTR layout entirely.
+
+The function returned `'rtl'` no matter how lopsided the text actually was. Even a 500-character English paragraph with one Hebrew letter would be treated as RTL.
+
+### The fix
+
+Both blind fallbacks were replaced with a simple majority-count: count how many RTL characters appear vs. how many LTR (a–z, A–Z) characters appear, and return whichever side wins.
+
+```javascript
+var rtlCount = 0, ltrCount = 0;
+for (var i = 0; i < text.length; i++) {
+    if (isRTL(text[i])) rtlCount++;
+    else if (/[a-zA-Z]/.test(text[i])) ltrCount++;
+}
+return (rtlCount > ltrCount) ? 'rtl' : 'ltr';
+```
+
+All the earlier detection layers (first-strong, leading-LTR stripping) are kept exactly as they were. Pure Hebrew and Arabic content still resolves to RTL the same way it did before — only the final tie-breaker changed, so mixed-language content now picks the dominant direction instead of always defaulting to RTL.
+
+### Other changes
+
+* Repository URLs in `install.ps1` and `patch.ps1` (the elevation re-download, the desktop shortcut, and the auto-update watcher) point at this fork so that re-downloads, the shortcut, and the watcher all stay in sync with the fix.
+
+Everything else — the menu options, the auto-update flow, the disclaimer, the certificate handling — is the original work of [shraga100](https://github.com/shraga100) and the upstream contributors.
+
 ## Quick Install
 
 Open **PowerShell** and run:
 
-`irm https://raw.githubusercontent.com/shraga100/claude-desktop-rtl-patch/main/install.ps1 | iex`
+`irm https://raw.githubusercontent.com/abatamny/claude-desktop-RTL-PATCH/main/install.ps1 | iex`
 
 A UAC prompt will appear — click **Yes** to grant admin privileges.
 

@@ -1,5 +1,5 @@
 $f = Join-Path $env:TEMP "claude_rtl_patch.ps1"
-$content = Invoke-RestMethod -Uri "https://raw.githubusercontent.com/shraga100/claude-desktop-rtl-patch/main/patch.ps1"
+$content = Invoke-RestMethod -Uri "https://raw.githubusercontent.com/abatamny/claude-desktop-RTL-PATCH/main/patch.ps1"
 # Invoke-RestMethod keeps a UTF-8 BOM as a leading U+FEFF char. Strip it so
 # WriteAllText with UTF8Encoding($true) doesn't end up writing a double BOM
 # (which PS 5.1 then fails to parse as a leading <# block comment).

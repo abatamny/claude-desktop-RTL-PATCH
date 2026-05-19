@@ -28,7 +28,7 @@ if (-not $IsAdmin) {
     # elevated window open so early errors (parse, init, missing Claude install) stay
     # visible instead of flashing and closing.
     $TmpScript = Join-Path $env:TEMP "claude_rtl_patch.ps1"
-    $RepoUrl = "https://raw.githubusercontent.com/shraga100/claude-desktop-rtl-patch/main/patch.ps1"
+    $RepoUrl = "https://raw.githubusercontent.com/abatamny/claude-desktop-RTL-PATCH/main/patch.ps1"
     Write-Host "Downloading script to temp file for elevation..." -ForegroundColor Cyan
     $content = Invoke-RestMethod -Uri $RepoUrl
     [System.IO.File]::WriteAllText($TmpScript, $content, [System.Text.UTF8Encoding]::new($true))
@@ -184,9 +184,15 @@ $RTL_INJECTION_CODE = @'
             d = firstStrong(stripped);
             if (d === 'rtl') return 'rtl';
 
-            // Layer 3: there ARE RTL chars (we checked above) but they hide
-            // behind code/filenames. Since RTL exists, treat as RTL.
-            return 'rtl';
+            // Layer 3: RTL chars exist but hide behind code/filenames.
+            // Decide by majority of RTL vs LTR characters in the text.
+            var text = noCode;
+            var rtlCount = 0, ltrCount = 0;
+            for (var i = 0; i < text.length; i++) {
+                if (isRTL(text[i])) rtlCount++;
+                else if (/[a-zA-Z]/.test(text[i])) ltrCount++;
+            }
+            return (rtlCount > ltrCount) ? 'rtl' : 'ltr';
         }
 
         // For plain text (input box, dialogs without DOM structure)
@@ -201,8 +207,13 @@ $RTL_INJECTION_CODE = @'
             d = firstStrong(stripped);
             if (d === 'rtl') return 'rtl';
 
-            // RTL chars exist somewhere → RTL
-            return 'rtl';
+            // RTL chars exist somewhere — decide by majority count.
+            var rtlCount = 0, ltrCount = 0;
+            for (var i = 0; i < text.length; i++) {
+                if (isRTL(text[i])) rtlCount++;
+                else if (/[a-zA-Z]/.test(text[i])) ltrCount++;
+            }
+            return (rtlCount > ltrCount) ? 'rtl' : 'ltr';
         }
 
         // --- ELEMENT PROCESSING ---
@@ -1094,7 +1105,7 @@ function Create-UpdateShortcut {
         $Shortcut.TargetPath = "powershell.exe"
         
         # הפקודה המדויקת שמושכת את ההתקנה העדכנית מהרשת ללא שמירת קובץ מקומי
-        $Shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -Command `"irm https://raw.githubusercontent.com/shraga100/claude-desktop-rtl-patch/main/install.ps1 | iex`""
+        $Shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -Command `"irm https://raw.githubusercontent.com/abatamny/claude-desktop-RTL-PATCH/main/install.ps1 | iex`""
         $Shortcut.Description = "Download and apply the latest Claude Desktop RTL patch"
         
         # ניסיון להשתמש באייקון של קלוד כדי שייראה יפה, אם לא - אייקון ברירת מחדל של PowerShell
@@ -1136,7 +1147,7 @@ $logFile        = Join-Path $stateDir "watcher.log"
 $lastActionFile = Join-Path $stateDir "last-action.txt"
 # Use install.ps1 — same path as the manual "Update Claude RTL" desktop shortcut.
 # install.ps1 handles BOM-encoding and elevation; we just signal Auto mode via env var.
-$installUrl     = "https://raw.githubusercontent.com/shraga100/claude-desktop-rtl-patch/main/install.ps1"
+$installUrl     = "https://raw.githubusercontent.com/abatamny/claude-desktop-RTL-PATCH/main/install.ps1"
 
 function Write-WLog($msg) {
     try {
