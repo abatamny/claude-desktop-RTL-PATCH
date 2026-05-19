@@ -50,14 +50,30 @@ $RTL_INJECTION_CODE = @'
     'use strict';
     if (typeof document === 'undefined') return;
     try {
+        var MESSAGE_SURFACE_SELECTOR = [
+            '[data-testid="user-message"]',
+            '.standard-markdown',
+            '.progressive-markdown'
+        ].join(',');
 
-        // ====================================================================
-        // RULE 1 — DIRECTION DETECTION  (single source of truth)
-        // Skip leading numbers, symbols, math, and whitespace. The first
-        // strong character decides direction:
-        //   Hebrew / Arabic  -> 'rtl'
-        //   Latin (A-Z, a-z) -> 'ltr'
-        // ====================================================================
+        var ADMIN_UI_SELECTOR = [
+            'nav',
+            'aside',
+            'header',
+            'footer',
+            'dialog',
+            '[role="navigation"]',
+            '[role="menu"]',
+            '[role="menubar"]',
+            '[role="toolbar"]',
+            '[data-testid*="sidebar"]',
+            '[aria-label="Sidebar"]'
+        ].join(',');
+
+        var CODE_SELECTOR = 'pre, code, .code-block, .code-block__code';
+        var MATH_SELECTOR = '.katex, [class*="math"]';
+        var processedTextBySurface = new WeakMap();
+
         function isRTLChar(c) {
             var code = c.charCodeAt(0);
             return (code >= 0x0590 && code <= 0x05FF) ||  // Hebrew
@@ -67,231 +83,129 @@ $RTL_INJECTION_CODE = @'
                    (code >= 0xFB1D && code <= 0xFDFF) ||  // Hebrew / Arabic Pres. Forms-A
                    (code >= 0xFE70 && code <= 0xFEFF);    // Arabic Pres. Forms-B
         }
+
         function isLatinChar(c) {
             return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
         }
-        function detectDir(text) {
+
+        function getDirectionByFirstStrongCharacter(text) {
             if (!text) return null;
             for (var i = 0; i < text.length; i++) {
                 var c = text.charAt(i);
-                if (isRTLChar(c))   return 'rtl';
+                if (isRTLChar(c)) return 'rtl';
                 if (isLatinChar(c)) return 'ltr';
-                // digits, punctuation, math symbols, whitespace -> skip
             }
             return null;
         }
 
-        // ====================================================================
-        // RULES 2 & 3 — ABSOLUTE OVERRIDES
-        // Math (class contains 'math' or 'katex') and code (pre, code,
-        // .code-block) are ALWAYS LTR. Nothing else can change them.
-        // ====================================================================
-        var MATH_SELECTOR     = '[class*="math"], [class*="katex"]';
-        var CODE_SELECTOR     = 'pre, code, .code-block, .code-block__code';
-        var OVERRIDE_SELECTOR = MATH_SELECTOR + ', ' + CODE_SELECTOR;
-
-        function isInsideOverride(el) {
-            return !!(el && el.closest && el.closest(OVERRIDE_SELECTOR));
-        }
-        function pinLTR(el) {
+        function protectCodeElement(el) {
             el.setAttribute('dir', 'ltr');
-            el.style.direction   = 'ltr';
-            el.style.textAlign   = 'left';
-            el.style.unicodeBidi = 'embed';
-        }
-        function applyOverrides(root) {
-            var base = (root && root.querySelectorAll) ? root : document;
-            base.querySelectorAll(OVERRIDE_SELECTOR).forEach(pinLTR);
-            if (root && root.matches && root.matches(OVERRIDE_SELECTOR)) pinLTR(root);
+            el.style.direction = 'ltr';
+            el.style.textAlign = 'left';
+            el.style.unicodeBidi = 'isolate';
         }
 
-        // ====================================================================
-        // RULE 5 — NESTED LTR INSIDE RTL
-        // Once a container is flagged RTL, find Latin runs inside it (Latin
-        // letters + adjacent symbols/digits, NOT inside math or code) and
-        // wrap each one in <span dir="ltr">.
-        // ====================================================================
-        var WRAP_FLAG = 'data-rtl-ltr-run';
-        // Start with a Latin letter; absorb adjacent Latin, digits, spaces,
-        // and common math / punctuation characters.
-        var LATIN_RUN_RE = /[A-Za-z][A-Za-z0-9 ()=+\-*\/^<>|.,!?:;'"`@#$%&_\[\]{}\\]*/g;
-
-        function wrapLatinRuns(container) {
-            if (!container || !container.ownerDocument) return;
-            var doc = container.ownerDocument;
-            var walker = doc.createTreeWalker(
-                container,
-                NodeFilter.SHOW_TEXT,
-                {
-                    acceptNode: function(node) {
-                        var p = node.parentNode;
-                        if (!p || p.nodeType !== 1) return NodeFilter.FILTER_REJECT;
-                        // Never wrap inside an override (Rules 2 & 3)
-                        if (p.closest && p.closest(OVERRIDE_SELECTOR)) return NodeFilter.FILTER_REJECT;
-                        // Never re-wrap an existing run
-                        if (p.hasAttribute && p.hasAttribute(WRAP_FLAG)) return NodeFilter.FILTER_REJECT;
-                        // Only act on text that actually contains a Latin letter
-                        if (!/[A-Za-z]/.test(node.nodeValue)) return NodeFilter.FILTER_REJECT;
-                        return NodeFilter.FILTER_ACCEPT;
-                    }
-                },
-                false
-            );
-            var nodes = [];
-            var n;
-            while ((n = walker.nextNode())) nodes.push(n);
-
-            nodes.forEach(function(node) {
-                var text = node.nodeValue;
-                LATIN_RUN_RE.lastIndex = 0;
-                var matches = [];
-                var m;
-                while ((m = LATIN_RUN_RE.exec(text)) !== null) {
-                    // Trim trailing whitespace from the run.
-                    var run = m[0].replace(/\s+$/, '');
-                    if (run.length === 0) continue;
-                    matches.push({ start: m.index, end: m.index + run.length, text: run });
-                }
-                if (matches.length === 0) return;
-
-                var frag = doc.createDocumentFragment();
-                var cursor = 0;
-                matches.forEach(function(seg) {
-                    if (seg.start > cursor) {
-                        frag.appendChild(doc.createTextNode(text.slice(cursor, seg.start)));
-                    }
-                    var span = doc.createElement('span');
-                    span.setAttribute('dir', 'ltr');
-                    span.setAttribute(WRAP_FLAG, '1');
-                    span.appendChild(doc.createTextNode(seg.text));
-                    frag.appendChild(span);
-                    cursor = seg.end;
-                });
-                if (cursor < text.length) {
-                    frag.appendChild(doc.createTextNode(text.slice(cursor)));
-                }
-                node.parentNode.replaceChild(frag, node);
-            });
+        function protectMathElement(el) {
+            el.setAttribute('dir', 'ltr');
+            el.style.direction = 'ltr';
+            el.style.unicodeBidi = 'isolate';
         }
 
-        // ====================================================================
-        // ELEMENT PROCESSING — apply Rule 1 (with overrides 2 & 3)
-        // ====================================================================
-        var BLOCK_SELECTOR =
-            'p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, ' +
-            'summary, label, dt, dd, figcaption, caption, ul, ol, ' +
-            'div, span, a, button';
-        var INPUT_SELECTOR = 'input, textarea, [contenteditable="true"]';
-
-        function setDir(el, dir) {
-            el.setAttribute('dir', dir);
-            el.style.direction = dir;
+        function applyProtectedDirection(surface) {
+            if (!surface || !surface.querySelectorAll) return;
+            surface.querySelectorAll(CODE_SELECTOR).forEach(protectCodeElement);
+            surface.querySelectorAll(MATH_SELECTOR).forEach(protectMathElement);
         }
 
-        function processElement(el) {
-            if (!el || el.nodeType !== 1) return;
-            if (isInsideOverride(el)) return;                 // Rules 2 & 3
-            var text = el.textContent;
-            if (!text || !text.trim()) return;
-            var dir = detectDir(text);                        // Rule 1
+        function isAdministrativeSurface(surface) {
+            return !!(surface && surface.closest && surface.closest(ADMIN_UI_SELECTOR));
+        }
+
+        function setSurfaceDirection(surface, dir) {
+            surface.setAttribute('dir', dir);
+            surface.style.direction = dir;
+            surface.style.textAlign = 'start';
+        }
+
+        function processMessageSurface(surface) {
+            if (!surface || surface.nodeType !== 1) return;
+            if (!surface.matches || !surface.matches(MESSAGE_SURFACE_SELECTOR)) return;
+            if (isAdministrativeSurface(surface)) return;
+
+            var text = surface.innerText || surface.textContent || '';
+            if (processedTextBySurface.get(surface) === text) return;
+            processedTextBySurface.set(surface, text);
+
+            applyProtectedDirection(surface);
+
+            var dir = getDirectionByFirstStrongCharacter(text);
             if (!dir) return;
-            setDir(el, dir);
-            if (dir === 'rtl') wrapLatinRuns(el);             // Rule 5
+            setSurfaceDirection(surface, dir);
         }
 
-        function processInput(el) {
-            if (!el || el.nodeType !== 1) return;
-            if (isInsideOverride(el)) return;
-            var text;
-            if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
-                text = el.value || '';
-            } else {
-                text = el.textContent || el.innerText || '';
+        function collectMessageSurfaces(root, surfaces) {
+            if (!root || root.nodeType !== 1) return;
+            if (root.matches && root.matches(MESSAGE_SURFACE_SELECTOR)) {
+                surfaces.add(root);
             }
-            var dir = detectDir(text);                        // Rule 1, Rule 4
-            if (!dir) return;
-            setDir(el, dir);
+            if (root.querySelectorAll) {
+                root.querySelectorAll(MESSAGE_SURFACE_SELECTOR).forEach(function(surface) {
+                    surfaces.add(surface);
+                });
+            }
         }
 
-        function processAll(root) {
-            root = root || document.body;
-            if (!root) return;
-            // Rules 2 & 3 first — pin overrides so nothing else touches them.
-            applyOverrides(root);
-            // Rule 4 — inputs / textareas / contenteditable.
-            (root.querySelectorAll ? root.querySelectorAll(INPUT_SELECTOR) : []).forEach(processInput);
-            if (root.matches && root.matches(INPUT_SELECTOR)) processInput(root);
-            // Rule 1 + Rule 5 — every other text-bearing element.
-            (root.querySelectorAll ? root.querySelectorAll(BLOCK_SELECTOR) : []).forEach(processElement);
-            if (root.matches && root.matches(BLOCK_SELECTOR)) processElement(root);
+        function processInitialMessageSurfaces() {
+            if (!document.body) return;
+            document.querySelectorAll(MESSAGE_SURFACE_SELECTOR).forEach(processMessageSurface);
         }
 
-        // ====================================================================
-        // STYLES — enforce overrides, honor explicit dir attributes
-        // ====================================================================
         function injectStyles() {
             if (document.getElementById('claude-rtl-styles')) return;
             var s = document.createElement('style');
             s.id = 'claude-rtl-styles';
             s.textContent = [
-                // Rules 2 & 3
-                '[class*="math"],[class*="katex"]{direction:ltr!important;unicode-bidi:embed!important;text-align:left!important}',
-                'pre,code,.code-block,.code-block__code{direction:ltr!important;unicode-bidi:embed!important;text-align:left!important}',
-                // Honor explicit dir set by Rule 1
-                '[dir="rtl"]{direction:rtl!important;text-align:start!important}',
-                '[dir="ltr"]{direction:ltr!important;text-align:start!important}',
-                // Rule 5: nested LTR runs always stay LTR
-                '[dir="rtl"] span[dir="ltr"]{direction:ltr;unicode-bidi:embed}'
+                '[data-testid="user-message"][dir="rtl"],.standard-markdown[dir="rtl"],.progressive-markdown[dir="rtl"]{direction:rtl!important;text-align:start!important}',
+                '[data-testid="user-message"][dir="ltr"],.standard-markdown[dir="ltr"],.progressive-markdown[dir="ltr"]{direction:ltr!important;text-align:start!important}',
+                '[data-testid="user-message"] pre,[data-testid="user-message"] code,[data-testid="user-message"] .code-block,[data-testid="user-message"] .code-block__code,.standard-markdown pre,.standard-markdown code,.standard-markdown .code-block,.standard-markdown .code-block__code,.progressive-markdown pre,.progressive-markdown code,.progressive-markdown .code-block,.progressive-markdown .code-block__code{direction:ltr!important;text-align:left!important;unicode-bidi:isolate!important}',
+                '[data-testid="user-message"] .katex,[data-testid="user-message"] [class*="math"],.standard-markdown .katex,.standard-markdown [class*="math"],.progressive-markdown .katex,.progressive-markdown [class*="math"]{direction:ltr!important;unicode-bidi:isolate!important}'
             ].join('');
             document.head.appendChild(s);
         }
 
-        // ====================================================================
-        // INIT + MUTATION OBSERVER
-        // ====================================================================
         function init() {
             injectStyles();
-            processAll(document.body);
+            processInitialMessageSurfaces();
 
-            // Rule 4: live re-detection on every `input` event.
-            document.addEventListener('input', function(e) {
-                var t = e.target;
-                if (!t || t.nodeType !== 1) return;
-                if (t.matches && t.matches(INPUT_SELECTOR)) processInput(t);
-            }, true);
-
-            // Re-process new content as Claude streams it in.
-            var pending = [];
+            var pendingSurfaces = new Set();
             var scheduled = false;
+
+            function scheduleProcessing() {
+                if (scheduled || pendingSurfaces.size === 0) return;
+                scheduled = true;
+                var run = function() {
+                    scheduled = false;
+                    var surfaces = Array.from(pendingSurfaces);
+                    pendingSurfaces.clear();
+                    surfaces.forEach(processMessageSurface);
+                };
+                if (typeof requestAnimationFrame === 'function') {
+                    requestAnimationFrame(run);
+                } else {
+                    setTimeout(run, 50);
+                }
+            }
+
             new MutationObserver(function(muts) {
                 for (var i = 0; i < muts.length; i++) {
                     var mu = muts[i];
-                    if (mu.type === 'characterData' || (mu.addedNodes && mu.addedNodes.length)) {
-                        pending.push(mu);
+                    if (!mu.addedNodes || !mu.addedNodes.length) continue;
+                    for (var k = 0; k < mu.addedNodes.length; k++) {
+                        collectMessageSurfaces(mu.addedNodes[k], pendingSurfaces);
                     }
                 }
-                if (scheduled || pending.length === 0) return;
-                scheduled = true;
-                setTimeout(function() {
-                    scheduled = false;
-                    var batch = pending; pending = [];
-                    var roots = new Set();
-                    batch.forEach(function(m) {
-                        if (m.addedNodes) {
-                            for (var k = 0; k < m.addedNodes.length; k++) {
-                                var n = m.addedNodes[k];
-                                if (n.nodeType === 1) roots.add(n);
-                            }
-                        }
-                        if (m.type === 'characterData' && m.target && m.target.parentElement) {
-                            roots.add(m.target.parentElement);
-                        }
-                    });
-                    if (roots.size === 0) return;
-                    if (roots.size > 30) processAll(document.body);
-                    else roots.forEach(function(r) { processAll(r); });
-                }, 50);
-            }).observe(document.body, { childList: true, subtree: true, characterData: true });
+                scheduleProcessing();
+            }).observe(document.body, { childList: true, subtree: true });
         }
 
         if (document.readyState === 'loading') {
