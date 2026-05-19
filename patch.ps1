@@ -70,9 +70,18 @@ $RTL_INJECTION_CODE = @'
             '[aria-label="Sidebar"]'
         ].join(',');
 
+        var SIDEBAR_ROOT_SELECTOR = 'nav[aria-label="Sidebar"]';
+        var SIDEBAR_TITLE_SELECTOR = [
+            'a[data-dd-action-name="sidebar-chat-item"] span.truncate',
+            'a[href^="/chat/"] span.truncate',
+            'a[href^="/project/"] span.truncate',
+            'a[href^="/project/"] .font-claude-response'
+        ].join(',');
+
         var CODE_SELECTOR = 'pre, code, .code-block, .code-block__code';
         var MATH_SELECTOR = '.katex, [class*="math"]';
         var processedTextBySurface = new WeakMap();
+        var processedTextBySidebarTitle = new WeakMap();
 
         function isRTLChar(c) {
             var code = c.charCodeAt(0);
@@ -160,6 +169,74 @@ $RTL_INJECTION_CODE = @'
             document.querySelectorAll(MESSAGE_SURFACE_SELECTOR).forEach(processMessageSurface);
         }
 
+        function isSidebarRoot(element) {
+            return !!(element && element.nodeType === 1 && element.matches && element.matches(SIDEBAR_ROOT_SELECTOR));
+        }
+
+        function isSidebarTitleElement(element) {
+            if (!element || element.nodeType !== 1 || !element.matches) return false;
+            if (!element.matches(SIDEBAR_TITLE_SELECTOR)) return false;
+            if (!element.closest || !element.closest(SIDEBAR_ROOT_SELECTOR)) return false;
+            if (element.closest('button, [role="button"], [role="menuitem"]')) return false;
+            return !!element.closest('a[data-dd-action-name="sidebar-chat-item"], a[href^="/chat/"], a[href^="/project/"]');
+        }
+
+        function processSidebarTitle(titleElement) {
+            if (!isSidebarTitleElement(titleElement)) return;
+
+            var text = titleElement.innerText || titleElement.textContent || '';
+            if (processedTextBySidebarTitle.get(titleElement) === text) return;
+            processedTextBySidebarTitle.set(titleElement, text);
+
+            var dir = getDirectionByFirstStrongCharacter(text);
+            if (!dir) return;
+
+            titleElement.style.textAlign = 'left';
+            titleElement.setAttribute('dir', dir);
+            titleElement.style.direction = dir;
+            titleElement.style.unicodeBidi = 'plaintext';
+        }
+
+        function processSidebar(root) {
+            if (!root || root.nodeType !== 1) return;
+            var sidebar = isSidebarRoot(root) ? root : (root.closest ? root.closest(SIDEBAR_ROOT_SELECTOR) : null);
+            if (!sidebar) return;
+
+            if (isSidebarTitleElement(root)) {
+                processSidebarTitle(root);
+            }
+            if (root.querySelectorAll) {
+                root.querySelectorAll(SIDEBAR_TITLE_SELECTOR).forEach(processSidebarTitle);
+            }
+        }
+
+        function processSidebarAddedNode(node, titles) {
+            if (!node || node.nodeType !== 1) return;
+            if (isSidebarTitleElement(node)) {
+                titles.add(node);
+            }
+
+            var sidebarRoot = isSidebarRoot(node) ? node : (node.closest ? node.closest(SIDEBAR_ROOT_SELECTOR) : null);
+            if (!sidebarRoot) return;
+
+            if (node.querySelectorAll) {
+                node.querySelectorAll(SIDEBAR_TITLE_SELECTOR).forEach(function(titleElement) {
+                    if (isSidebarTitleElement(titleElement)) titles.add(titleElement);
+                });
+            }
+        }
+
+        function collectSidebarTitleFromChangedText(node, titles) {
+            if (!node || !node.parentElement) return;
+            var titleElement = node.parentElement.closest ? node.parentElement.closest(SIDEBAR_TITLE_SELECTOR) : null;
+            if (isSidebarTitleElement(titleElement)) titles.add(titleElement);
+        }
+
+        function processInitialSidebar() {
+            if (!document.body) return;
+            document.querySelectorAll(SIDEBAR_ROOT_SELECTOR).forEach(processSidebar);
+        }
+
         function injectStyles() {
             if (document.getElementById('claude-rtl-styles')) return;
             var s = document.createElement('style');
@@ -168,7 +245,9 @@ $RTL_INJECTION_CODE = @'
                 '[data-testid="user-message"][dir="rtl"],.standard-markdown[dir="rtl"],.progressive-markdown[dir="rtl"]{direction:rtl!important;text-align:start!important}',
                 '[data-testid="user-message"][dir="ltr"],.standard-markdown[dir="ltr"],.progressive-markdown[dir="ltr"]{direction:ltr!important;text-align:start!important}',
                 '[data-testid="user-message"] pre,[data-testid="user-message"] code,[data-testid="user-message"] .code-block,[data-testid="user-message"] .code-block__code,.standard-markdown pre,.standard-markdown code,.standard-markdown .code-block,.standard-markdown .code-block__code,.progressive-markdown pre,.progressive-markdown code,.progressive-markdown .code-block,.progressive-markdown .code-block__code{direction:ltr!important;text-align:left!important;unicode-bidi:isolate!important}',
-                '[data-testid="user-message"] .katex,[data-testid="user-message"] [class*="math"],.standard-markdown .katex,.standard-markdown [class*="math"],.progressive-markdown .katex,.progressive-markdown [class*="math"]{direction:ltr!important;unicode-bidi:isolate!important}'
+                '[data-testid="user-message"] .katex,[data-testid="user-message"] [class*="math"],.standard-markdown .katex,.standard-markdown [class*="math"],.progressive-markdown .katex,.progressive-markdown [class*="math"]{direction:ltr!important;unicode-bidi:isolate!important}',
+                'nav[aria-label="Sidebar"]{direction:ltr!important;text-align:left!important}',
+                'nav[aria-label="Sidebar"] a[data-dd-action-name="sidebar-chat-item"] span.truncate,nav[aria-label="Sidebar"] a[href^="/chat/"] span.truncate,nav[aria-label="Sidebar"] a[href^="/project/"] span.truncate,nav[aria-label="Sidebar"] a[href^="/project/"] .font-claude-response{text-align:left!important}'
             ].join('');
             document.head.appendChild(s);
         }
@@ -176,18 +255,23 @@ $RTL_INJECTION_CODE = @'
         function init() {
             injectStyles();
             processInitialMessageSurfaces();
+            processInitialSidebar();
 
             var pendingSurfaces = new Set();
+            var pendingSidebarTitles = new Set();
             var scheduled = false;
 
             function scheduleProcessing() {
-                if (scheduled || pendingSurfaces.size === 0) return;
+                if (scheduled || (pendingSurfaces.size === 0 && pendingSidebarTitles.size === 0)) return;
                 scheduled = true;
                 var run = function() {
                     scheduled = false;
                     var surfaces = Array.from(pendingSurfaces);
+                    var titles = Array.from(pendingSidebarTitles);
                     pendingSurfaces.clear();
+                    pendingSidebarTitles.clear();
                     surfaces.forEach(processMessageSurface);
+                    titles.forEach(processSidebarTitle);
                 };
                 if (typeof requestAnimationFrame === 'function') {
                     requestAnimationFrame(run);
@@ -199,13 +283,18 @@ $RTL_INJECTION_CODE = @'
             new MutationObserver(function(muts) {
                 for (var i = 0; i < muts.length; i++) {
                     var mu = muts[i];
+                    if (mu.type === 'characterData') {
+                        collectSidebarTitleFromChangedText(mu.target, pendingSidebarTitles);
+                        continue;
+                    }
                     if (!mu.addedNodes || !mu.addedNodes.length) continue;
                     for (var k = 0; k < mu.addedNodes.length; k++) {
                         collectMessageSurfaces(mu.addedNodes[k], pendingSurfaces);
+                        processSidebarAddedNode(mu.addedNodes[k], pendingSidebarTitles);
                     }
                 }
                 scheduleProcessing();
-            }).observe(document.body, { childList: true, subtree: true });
+            }).observe(document.body, { childList: true, subtree: true, characterData: true });
         }
 
         if (document.readyState === 'loading') {
