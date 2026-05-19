@@ -1679,11 +1679,12 @@ function Show-Menu {
     Write-Host "  3. Create 'Quick Update' Desktop Shortcut" -ForegroundColor Green
     Write-Host "  4. Enable Auto Re-Patch After Each Claude Update (Background Service)" -ForegroundColor Green
     Write-Host "  5. Disable Auto Re-Patch Service" -ForegroundColor White
-    Write-Host "  6. Exit" -ForegroundColor White
+    Write-Host "  7. Reinstall (Restore then Install)" -ForegroundColor Yellow
+    Write-Host "  8. Exit" -ForegroundColor White
 
-    $choice = Read-Host "`nEnter your choice (1/2/3/4/5/6)"
+    $choice = Read-Host "`nEnter your choice (1/2/3/4/5/7/8)"
 
-    if ($choice -eq '1' -or $choice -eq '2') {
+    if ($choice -eq '1' -or $choice -eq '2' -or $choice -eq '7') {
         Write-Host "`nWARNING: This will automatically close Claude Desktop and its background services." -ForegroundColor Yellow
         $confirm = Read-Host "Do you want to continue? (Y/n)"
         if ($confirm -eq 'n' -or $confirm -eq 'N') {
@@ -1695,7 +1696,12 @@ function Show-Menu {
 
         try {
             if ($choice -eq '1') { Install-Patch }
-            else { Restore-Patch }
+            elseif ($choice -eq '2') { Restore-Patch }
+            else {
+                # Option 7 — Reinstall: run Restore-Patch, then immediately Install-Patch.
+                Restore-Patch
+                Install-Patch
+            }
         } catch {
             Write-Host "`n[!] Final Script Status:" -ForegroundColor DarkGray
             Write-Host $_.Exception.Message -ForegroundColor Red
@@ -1722,7 +1728,7 @@ function Show-Menu {
         $null = Read-Host
         Show-Menu
     }
-    elseif ($choice -eq '6') { Exit }
+    elseif ($choice -eq '8') { Exit }
     else { Show-Menu }
 }
 
