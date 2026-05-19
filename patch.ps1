@@ -50,370 +50,255 @@ $RTL_INJECTION_CODE = @'
     'use strict';
     if (typeof document === 'undefined') return;
     try {
-        var WRITING_SEL = '[data-testid="chat-input"]';
 
-        function isRTL(c) {
+        // ====================================================================
+        // RULE 1 — DIRECTION DETECTION  (single source of truth)
+        // Skip leading numbers, symbols, math, and whitespace. The first
+        // strong character decides direction:
+        //   Hebrew / Arabic  -> 'rtl'
+        //   Latin (A-Z, a-z) -> 'ltr'
+        // ====================================================================
+        function isRTLChar(c) {
             var code = c.charCodeAt(0);
-            return (code >= 0x0590 && code <= 0x05FF) ||
-                   (code >= 0x0600 && code <= 0x06FF) ||
-                   (code >= 0x0750 && code <= 0x077F) ||
-                   (code >= 0x08A0 && code <= 0x08FF);
+            return (code >= 0x0590 && code <= 0x05FF) ||  // Hebrew
+                   (code >= 0x0600 && code <= 0x06FF) ||  // Arabic
+                   (code >= 0x0750 && code <= 0x077F) ||  // Arabic Supplement
+                   (code >= 0x08A0 && code <= 0x08FF) ||  // Arabic Extended-A
+                   (code >= 0xFB1D && code <= 0xFDFF) ||  // Hebrew / Arabic Pres. Forms-A
+                   (code >= 0xFE70 && code <= 0xFEFF);    // Arabic Pres. Forms-B
         }
-
-        function hasRTL(text) {
-            if (!text) return false;
-            for (var i = 0; i < text.length; i++) { if (isRTL(text[i])) return true; }
-            return false;
+        function isLatinChar(c) {
+            return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
         }
-
-        // First strong character direction in a string
-        function firstStrong(text) {
+        function detectDir(text) {
             if (!text) return null;
             for (var i = 0; i < text.length; i++) {
-                if (isRTL(text[i])) return 'rtl';
-                if (/[a-zA-Z]/.test(text[i])) return 'ltr';
+                var c = text.charAt(i);
+                if (isRTLChar(c))   return 'rtl';
+                if (isLatinChar(c)) return 'ltr';
+                // digits, punctuation, math symbols, whitespace -> skip
             }
             return null;
         }
 
-        // Get text from element excluding <code> children (DOM-aware)
-        function textWithoutCode(el) {
-            var out = '';
-            var nodes = el.childNodes;
-            for (var i = 0; i < nodes.length; i++) {
-                var n = nodes[i];
-                if (n.nodeType === 3) { out += n.textContent; }
-                else if (n.nodeType === 1 && n.tagName !== 'CODE' && n.tagName !== 'PRE') {
-                    out += textWithoutCode(n);
-                }
-            }
-            return out;
+        // ====================================================================
+        // RULES 2 & 3 — ABSOLUTE OVERRIDES
+        // Math (class contains 'math' or 'katex') and code (pre, code,
+        // .code-block) are ALWAYS LTR. Nothing else can change them.
+        // ====================================================================
+        var MATH_SELECTOR     = '[class*="math"], [class*="katex"]';
+        var CODE_SELECTOR     = 'pre, code, .code-block, .code-block__code';
+        var OVERRIDE_SELECTOR = MATH_SELECTOR + ', ' + CODE_SELECTOR;
+
+        function isInsideOverride(el) {
+            return !!(el && el.closest && el.closest(OVERRIDE_SELECTOR));
+        }
+        function pinLTR(el) {
+            el.setAttribute('dir', 'ltr');
+            el.style.direction   = 'ltr';
+            el.style.textAlign   = 'left';
+            el.style.unicodeBidi = 'embed';
+        }
+        function applyOverrides(root) {
+            var base = (root && root.querySelectorAll) ? root : document;
+            base.querySelectorAll(OVERRIDE_SELECTOR).forEach(pinLTR);
+            if (root && root.matches && root.matches(OVERRIDE_SELECTOR)) pinLTR(root);
         }
 
-        // Strip leading LTR-only patterns from plain text
-        // Removes: filenames (x.js), URLs, paths (a/b/c), backtick-code
-        function stripLeadingLTR(text) {
-            return text
-                .replace(/^[\s]*(?:[\w.\-]+\.[\w]{1,5})\s*/g, '')
-                .replace(/https?:\/\/\S+/g, '')
-                .replace(/[\w.\-]+[\/\\][\w.\-\/\\]+/g, '')
-                .replace(/`[^`]+`/g, '');
-        }
+        // ====================================================================
+        // RULE 5 — NESTED LTR INSIDE RTL
+        // Once a container is flagged RTL, find Latin runs inside it (Latin
+        // letters + adjacent symbols/digits, NOT inside math or code) and
+        // wrap each one in <span dir="ltr">.
+        // ====================================================================
+        var WRAP_FLAG = 'data-rtl-ltr-run';
+        // Start with a Latin letter; absorb adjacent Latin, digits, spaces,
+        // and common math / punctuation characters.
+        var LATIN_RUN_RE = /[A-Za-z][A-Za-z0-9 ()=+\-*\/^<>|.,!?:;'"`@#$%&_\[\]{}\\]*/g;
 
-        // --- PER-LINE DIRECTIONAL SPLITTING ---
-        //
-        // A paragraph rendered with <br> separators or whitespace-pre may carry
-        // multiple lines, each in a different script. Forcing a single dir on the
-        // host element mangles every line that disagrees. We instead wrap each
-        // line in its own dir-tagged span and stamp data-rtl-split on the host so
-        // subsequent passes recognize it as already handled.
-
-        var RTL_SPLIT_FLAG = 'data-rtl-split';
-        var BR_OR_NL_SPLIT = /(<br\s*\/?>|\n)/i;
-
-        function hasMultiScriptLines(el) {
-            var src = el.textContent;
-            if (!src) return false;
-            if (!/[a-zA-Z]{2,}/.test(src)) return false;
-            if (!hasRTL(src)) return false;
-            // A break must appear in markup or in the rendered text.
-            return BR_OR_NL_SPLIT.test(el.innerHTML) || src.indexOf('\n') !== -1;
-        }
-
-        function splitToDirectionalSpans(el) {
-            if (el.hasAttribute(RTL_SPLIT_FLAG)) return;
-            // Capturing split: even indices are content, odd indices are the
-            // separator tokens that we want to drop.
-            var segments = el.innerHTML.split(BR_OR_NL_SPLIT);
-            var pieces = [];
-            for (var idx = 0; idx < segments.length; idx += 2) {
-                pieces.push(segments[idx]);
-            }
-            if (pieces.length < 2) return;
-
-            var built = [];
-            for (var p = 0; p < pieces.length; p++) {
-                var chunk = pieces[p];
-                var bare = chunk.replace(/<[^>]+>/g, '').trim();
-                if (bare.length === 0) {
-                    built.push('<span style="display:block;min-height:1em"></span>');
-                    continue;
-                }
-                var pickedDir = detectTextDir(bare);
-                var dirAttr = pickedDir ? ' dir="' + pickedDir + '"' : '';
-                built.push('<span' + dirAttr +
-                           ' style="display:block;text-align:start">' + chunk + '</span>');
-            }
-
-            // Stamp first so an observer callback re-entering during the
-            // innerHTML swap sees us as already processed.
-            el.setAttribute(RTL_SPLIT_FLAG, '1');
-            if (el.hasAttribute('dir')) el.removeAttribute('dir');
-            el.style.direction = '';
-            el.style.textAlign = '';
-            el.innerHTML = built.join('');
-        }
-
-        // Used by the no-RTL branches below: if the element inherits RTL purely
-        // via CSS class on a parent (rather than an explicit dir attribute on
-        // itself), removing dir alone won't free it — we must pin direction=ltr.
-        function resetDirOrPinLTR(el) {
-            if (window.getComputedStyle(el).direction === 'rtl') {
-                el.dir = 'ltr';
-                el.style.direction = 'ltr';
-                return;
-            }
-            if (el.hasAttribute('dir')) el.removeAttribute('dir');
-            el.style.direction = '';
-        }
-
-        // --- HYBRID DIRECTION DETECTION ---
-
-        // For DOM elements (output): 3-layer detection
-        function detectElDir(el) {
-            var full = el.textContent || '';
-            if (!hasRTL(full)) return null;
-
-            // Layer 1: first-strong on text excluding <code> children
-            var noCode = textWithoutCode(el);
-            var d = firstStrong(noCode);
-            if (d === 'rtl') return 'rtl';
-
-            // Layer 2: strip leading filenames/URLs, then first-strong
-            var stripped = stripLeadingLTR(noCode);
-            d = firstStrong(stripped);
-            if (d === 'rtl') return 'rtl';
-
-            // Layer 3: RTL chars exist but hide behind code/filenames.
-            // Decide by majority of RTL vs LTR characters in the text.
-            var text = noCode;
-            var rtlCount = 0, ltrCount = 0;
-            for (var i = 0; i < text.length; i++) {
-                if (isRTL(text[i])) rtlCount++;
-                else if (/[a-zA-Z()=+\-*\/^<>|]/.test(text[i])) ltrCount++;
-            }
-            return (rtlCount > ltrCount) ? 'rtl' : 'ltr';
-        }
-
-        // For plain text (input box, dialogs without DOM structure)
-        function detectTextDir(text) {
-            if (!text || !text.trim()) return null;
-            var d = firstStrong(text);
-            if (d === 'rtl') return 'rtl';
-            if (!hasRTL(text)) return 'ltr';
-
-            // Has RTL but first-strong is LTR — strip patterns and retry
-            var stripped = stripLeadingLTR(text);
-            d = firstStrong(stripped);
-            if (d === 'rtl') return 'rtl';
-
-            // RTL chars exist somewhere — decide by majority count.
-            var rtlCount = 0, ltrCount = 0;
-            for (var i = 0; i < text.length; i++) {
-                if (isRTL(text[i])) rtlCount++;
-                else if (/[a-zA-Z()=+\-*\/^<>|]/.test(text[i])) ltrCount++;
-            }
-            return (rtlCount > ltrCount) ? 'rtl' : 'ltr';
-        }
-
-        // --- ELEMENT PROCESSING ---
-
-        // querySelectorAll that INCLUDES root itself if it matches
-        function qsa(root, sel) {
-            var base = root.querySelectorAll ? root : document;
-            var els = Array.from(base.querySelectorAll(sel));
-            if (root.matches && root.matches(sel)) els.unshift(root);
-            return els;
-        }
-
-        function forceCodeLTR(root) {
-            qsa(root, 'pre, .code-block__code, .relative.group\\/copy').forEach(function(b) {
-                b.dir = 'ltr'; b.style.textAlign = 'left'; b.style.unicodeBidi = 'embed';
-            });
-            qsa(root, 'code').forEach(function(c) {
-                if (!c.closest('pre') && !c.closest('.code-block__code')) c.dir = 'ltr';
-            });
-        }
-
-        function processText(root) {
-            // Standard text elements
-            qsa(root, 'p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, summary, label, dt, dd').forEach(function(el) {
-                if (el.closest(WRITING_SEL) || el.closest('pre') || el.closest('.code-block__code')) return;
-                if (el.hasAttribute(RTL_SPLIT_FLAG)) return;
-                var dir = detectElDir(el);
-                if (dir) {
-                    // RTL paragraphs with internal line breaks need per-line
-                    // treatment — otherwise a single English line buried in
-                    // Hebrew text inherits the wrong direction.
-                    if (dir === 'rtl' && hasMultiScriptLines(el)) {
-                        splitToDirectionalSpans(el);
-                        return;
+        function wrapLatinRuns(container) {
+            if (!container || !container.ownerDocument) return;
+            var doc = container.ownerDocument;
+            var walker = doc.createTreeWalker(
+                container,
+                NodeFilter.SHOW_TEXT,
+                {
+                    acceptNode: function(node) {
+                        var p = node.parentNode;
+                        if (!p || p.nodeType !== 1) return NodeFilter.FILTER_REJECT;
+                        // Never wrap inside an override (Rules 2 & 3)
+                        if (p.closest && p.closest(OVERRIDE_SELECTOR)) return NodeFilter.FILTER_REJECT;
+                        // Never re-wrap an existing run
+                        if (p.hasAttribute && p.hasAttribute(WRAP_FLAG)) return NodeFilter.FILTER_REJECT;
+                        // Only act on text that actually contains a Latin letter
+                        if (!/[A-Za-z]/.test(node.nodeValue)) return NodeFilter.FILTER_REJECT;
+                        return NodeFilter.FILTER_ACCEPT;
                     }
-                    el.dir = dir;
-                    el.style.direction = dir;
-                    if (el.tagName === 'LI') {
-                        el.style.listStylePosition = (dir === 'rtl') ? 'inside' : '';
-                        // Propagate RTL to parent list immediately to fix bullet position
-                        var parentList = el.closest('ul, ol');
-                        if (parentList && dir === 'rtl' && !parentList.hasAttribute('dir')) {
-                            parentList.dir = 'rtl';
-                            parentList.style.direction = 'rtl';
-                            var pl = getComputedStyle(parentList).paddingLeft;
-                            if (parseFloat(pl) > 0) { parentList.style.paddingRight = pl; parentList.style.paddingLeft = '0'; }
-                        }
+                },
+                false
+            );
+            var nodes = [];
+            var n;
+            while ((n = walker.nextNode())) nodes.push(n);
+
+            nodes.forEach(function(node) {
+                var text = node.nodeValue;
+                LATIN_RUN_RE.lastIndex = 0;
+                var matches = [];
+                var m;
+                while ((m = LATIN_RUN_RE.exec(text)) !== null) {
+                    // Trim trailing whitespace from the run.
+                    var run = m[0].replace(/\s+$/, '');
+                    if (run.length === 0) continue;
+                    matches.push({ start: m.index, end: m.index + run.length, text: run });
+                }
+                if (matches.length === 0) return;
+
+                var frag = doc.createDocumentFragment();
+                var cursor = 0;
+                matches.forEach(function(seg) {
+                    if (seg.start > cursor) {
+                        frag.appendChild(doc.createTextNode(text.slice(cursor, seg.start)));
                     }
-                } else {
-                    resetDirOrPinLTR(el);
-                    if (el.tagName === 'LI') el.style.listStylePosition = '';
+                    var span = doc.createElement('span');
+                    span.setAttribute('dir', 'ltr');
+                    span.setAttribute(WRAP_FLAG, '1');
+                    span.appendChild(doc.createTextNode(seg.text));
+                    frag.appendChild(span);
+                    cursor = seg.end;
+                });
+                if (cursor < text.length) {
+                    frag.appendChild(doc.createTextNode(text.slice(cursor)));
                 }
-            });
-
-            // Lists
-            qsa(root, 'ul, ol').forEach(function(el) {
-                if (el.closest(WRITING_SEL) || el.closest('pre')) return;
-                var dir = detectElDir(el);
-                if (dir === 'rtl') {
-                    el.dir = 'rtl';
-                    el.style.direction = 'rtl';
-                    var pl = getComputedStyle(el).paddingLeft;
-                    if (parseFloat(pl) > 0) { el.style.paddingRight = pl; el.style.paddingLeft = '0'; }
-                } else {
-                    resetDirOrPinLTR(el);
-                    el.style.paddingRight = ''; el.style.paddingLeft = '';
-                }
+                node.parentNode.replaceChild(frag, node);
             });
         }
 
-        // Universal: process ANY leaf text container (catches dialogs, tooltips, etc.)
-        function processContainers(root) {
-            qsa(root, 'div, span, button, a, label').forEach(function(el) {
-                if (el.closest('pre') || el.closest('code') || el.closest(WRITING_SEL)) return;
-                // Bail if we (or our wrapping host) already converted this subtree into per-line spans.
-                if (el.hasAttribute(RTL_SPLIT_FLAG)) return;
-                var parent = el.parentElement;
-                if (parent && parent.hasAttribute(RTL_SPLIT_FLAG)) return;
-                // Skip if has block children (not a leaf)
-                if (el.querySelector('p, div, ul, ol, h1, h2, h3, h4, h5, h6, pre, table')) return;
-                // Skip elements already handled by processText
-                if (/^(P|LI|H[1-6]|BLOCKQUOTE|TD|TH|UL|OL)$/.test(el.tagName)) return;
-                var text = (el.textContent || '').trim();
-                if (text.length < 2) return;
-                if (hasRTL(text)) {
-                    if (hasMultiScriptLines(el)) {
-                        splitToDirectionalSpans(el);
-                    } else {
-                        el.dir = detectTextDir(text) || 'rtl';
-                        el.style.textAlign = 'start';
-                    }
-                } else if (el.hasAttribute('dir')) {
-                    el.removeAttribute('dir');
-                    el.style.textAlign = '';
-                }
-            });
+        // ====================================================================
+        // ELEMENT PROCESSING — apply Rule 1 (with overrides 2 & 3)
+        // ====================================================================
+        var BLOCK_SELECTOR =
+            'p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, ' +
+            'summary, label, dt, dd, figcaption, caption, ul, ol, ' +
+            'div, span, a, button';
+        var INPUT_SELECTOR = 'input, textarea, [contenteditable="true"]';
+
+        function setDir(el, dir) {
+            el.setAttribute('dir', dir);
+            el.style.direction = dir;
         }
 
-        function processInput() {
-            document.querySelectorAll(WRITING_SEL).forEach(function(input) {
-                var text = input.textContent || input.innerText || '';
-                var dir = detectTextDir(text);
-                if (dir === 'rtl') {
-                    input.style.direction = 'rtl'; input.style.textAlign = 'right'; input.style.paddingRight = '25px';
-                } else {
-                    input.style.direction = 'ltr'; input.style.textAlign = 'left'; input.style.paddingRight = '';
-                }
-            });
+        function processElement(el) {
+            if (!el || el.nodeType !== 1) return;
+            if (isInsideOverride(el)) return;                 // Rules 2 & 3
+            var text = el.textContent;
+            if (!text || !text.trim()) return;
+            var dir = detectDir(text);                        // Rule 1
+            if (!dir) return;
+            setDir(el, dir);
+            if (dir === 'rtl') wrapLatinRuns(el);             // Rule 5
         }
 
-        function processAll() {
-            processText(document);
-            processContainers(document.body);
-            processInput();
-            forceCodeLTR(document.body);
+        function processInput(el) {
+            if (!el || el.nodeType !== 1) return;
+            if (isInsideOverride(el)) return;
+            var text;
+            if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+                text = el.value || '';
+            } else {
+                text = el.textContent || el.innerText || '';
+            }
+            var dir = detectDir(text);                        // Rule 1, Rule 4
+            if (!dir) return;
+            setDir(el, dir);
         }
 
+        function processAll(root) {
+            root = root || document.body;
+            if (!root) return;
+            // Rules 2 & 3 first — pin overrides so nothing else touches them.
+            applyOverrides(root);
+            // Rule 4 — inputs / textareas / contenteditable.
+            (root.querySelectorAll ? root.querySelectorAll(INPUT_SELECTOR) : []).forEach(processInput);
+            if (root.matches && root.matches(INPUT_SELECTOR)) processInput(root);
+            // Rule 1 + Rule 5 — every other text-bearing element.
+            (root.querySelectorAll ? root.querySelectorAll(BLOCK_SELECTOR) : []).forEach(processElement);
+            if (root.matches && root.matches(BLOCK_SELECTOR)) processElement(root);
+        }
+
+        // ====================================================================
+        // STYLES — enforce overrides, honor explicit dir attributes
+        // ====================================================================
         function injectStyles() {
             if (document.getElementById('claude-rtl-styles')) return;
             var s = document.createElement('style');
             s.id = 'claude-rtl-styles';
             s.textContent = [
-                'p:not([dir]),li:not([dir]),h1:not([dir]),h2:not([dir]),h3:not([dir]),h4:not([dir]),h5:not([dir]),h6:not([dir]),blockquote:not([dir]),td:not([dir]),th:not([dir]),summary:not([dir]),label:not([dir]),legend:not([dir]),dt:not([dir]),dd:not([dir]),figcaption:not([dir]),caption:not([dir]){unicode-bidi:plaintext!important;text-align:start!important}',
-                'pre,.code-block__code,.relative.group\\/copy{unicode-bidi:embed!important;direction:ltr!important;text-align:left!important}',
-                'code{unicode-bidi:isolate!important;direction:ltr!important}',
-                '[dir]{text-align:start!important}[dir="rtl"]{direction:rtl!important}[dir="ltr"]{direction:ltr!important}',
-                '[dir]>*:not([dir]):not(pre):not(code):not(.code-block__code){unicode-bidi:plaintext;text-align:start}',
-                // RTL: flip sidebar truncation gradient to fade the LEFT edge
-                // (Tailwind classes like [mask-image:linear-gradient(to_right,...)] cut off
-                // the start of Hebrew text instead of the end — see issue #7).
-                '[dir="rtl"][class*="mask-image:linear-gradient(to_right"]{-webkit-mask-image:linear-gradient(to left,hsl(var(--always-black)) 85%,transparent 99%)!important;mask-image:linear-gradient(to left,hsl(var(--always-black)) 85%,transparent 99%)!important}',
-                '.group:hover [dir="rtl"][class*="mask-image:linear-gradient(to_right"],.group:focus-within [dir="rtl"][class*="mask-image:linear-gradient(to_right"],[data-menu-open="true"] [dir="rtl"][class*="mask-image:linear-gradient(to_right"]{-webkit-mask-image:linear-gradient(to left,hsl(var(--always-black)) 60%,transparent 78%)!important;mask-image:linear-gradient(to left,hsl(var(--always-black)) 60%,transparent 78%)!important}'
+                // Rules 2 & 3
+                '[class*="math"],[class*="katex"]{direction:ltr!important;unicode-bidi:embed!important;text-align:left!important}',
+                'pre,code,.code-block,.code-block__code{direction:ltr!important;unicode-bidi:embed!important;text-align:left!important}',
+                // Honor explicit dir set by Rule 1
+                '[dir="rtl"]{direction:rtl!important;text-align:start!important}',
+                '[dir="ltr"]{direction:ltr!important;text-align:start!important}',
+                // Rule 5: nested LTR runs always stay LTR
+                '[dir="rtl"] span[dir="ltr"]{direction:ltr;unicode-bidi:embed}'
             ].join('');
             document.head.appendChild(s);
         }
 
+        // ====================================================================
+        // INIT + MUTATION OBSERVER
+        // ====================================================================
         function init() {
             injectStyles();
-            processAll();
+            processAll(document.body);
 
-            // Input box live direction switching
+            // Rule 4: live re-detection on every `input` event.
             document.addEventListener('input', function(e) {
                 var t = e.target;
-                if (!t || !(t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable)) return;
-                var text = t.textContent || t.innerText || t.value || '';
-                var dir = detectTextDir(text);
-                if (dir === 'rtl') {
-                    t.style.direction = 'rtl'; t.style.textAlign = 'right'; t.style.paddingRight = '25px';
-                } else {
-                    t.style.direction = 'ltr'; t.style.textAlign = 'left'; t.style.paddingRight = '';
-                }
+                if (!t || t.nodeType !== 1) return;
+                if (t.matches && t.matches(INPUT_SELECTOR)) processInput(t);
             }, true);
 
-            // Watch DOM changes (throttle, not debounce — process DURING streaming)
-            var pendingMuts = [];
-            var obs = new MutationObserver(function(muts) {
-                var dominated = false;
+            // Re-process new content as Claude streams it in.
+            var pending = [];
+            var scheduled = false;
+            new MutationObserver(function(muts) {
                 for (var i = 0; i < muts.length; i++) {
-                    if (muts[i].addedNodes.length > 0 || muts[i].type === 'characterData') { dominated = true; break; }
-                }
-                if (!dominated) return;
-                for (var j = 0; j < muts.length; j++) pendingMuts.push(muts[j]);
-                if (window._rtlT) return; // throttle: already scheduled
-                window._rtlT = setTimeout(function() {
-                    window._rtlT = null;
-                    var toProcess = pendingMuts;
-                    pendingMuts = [];
-                    var roots = new Set();
-                    toProcess.forEach(function(m) {
-                        m.addedNodes.forEach(function(n) { if (n.nodeType === 1) roots.add(n); });
-                        if (m.type === 'characterData' && m.target.parentElement) roots.add(m.target.parentElement);
-                    });
-                    // Expand roots to include ancestor text/list elements
-                    var expanded = new Set(roots);
-                    roots.forEach(function(r) {
-                        if (!r.closest) return;
-                        var txt = r.closest('p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, summary, label, dt, dd');
-                        if (txt) expanded.add(txt);
-                        var list = r.closest('ul, ol');
-                        if (list) expanded.add(list);
-                    });
-                    roots = expanded;
-                    if (roots.size > 0 && roots.size <= 30) {
-                        roots.forEach(function(r) {
-                            processText(r);
-                            processContainers(r);
-                            forceCodeLTR(r);
-                        });
-                        processInput();
-                    } else {
-                        processAll();
+                    var mu = muts[i];
+                    if (mu.type === 'characterData' || (mu.addedNodes && mu.addedNodes.length)) {
+                        pending.push(mu);
                     }
+                }
+                if (scheduled || pending.length === 0) return;
+                scheduled = true;
+                setTimeout(function() {
+                    scheduled = false;
+                    var batch = pending; pending = [];
+                    var roots = new Set();
+                    batch.forEach(function(m) {
+                        if (m.addedNodes) {
+                            for (var k = 0; k < m.addedNodes.length; k++) {
+                                var n = m.addedNodes[k];
+                                if (n.nodeType === 1) roots.add(n);
+                            }
+                        }
+                        if (m.type === 'characterData' && m.target && m.target.parentElement) {
+                            roots.add(m.target.parentElement);
+                        }
+                    });
+                    if (roots.size === 0) return;
+                    if (roots.size > 30) processAll(document.body);
+                    else roots.forEach(function(r) { processAll(r); });
                 }, 50);
-            });
-            obs.observe(document.body, { childList: true, subtree: true, characterData: true });
+            }).observe(document.body, { childList: true, subtree: true, characterData: true });
         }
 
         if (document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', init);
-        } else { init(); }
+        } else {
+            init();
+        }
     } catch(e) { console.error('[Claude RTL]', e); }
 })();
 // --- CLAUDE RTL PATCH END ---

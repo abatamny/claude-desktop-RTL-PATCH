@@ -2,7 +2,7 @@
 
 Smart RTL (Right-to-Left) support for **Claude Desktop on Windows**. Adds automatic Hebrew/Arabic text direction detection without breaking English or code blocks.
 
-> **This is a fork of [shraga100/claude-desktop-rtl-patch](https://github.com/shraga100/claude-desktop-rtl-patch).** All the credit for the original patch, the ASAR injection workflow, the executable hash replacement, and the certificate-swap technique goes to the upstream project. This fork adds a fix to the RTL detection logic so that mostly-English text is no longer flipped to RTL because of a single Hebrew or Arabic character. See [What's different in this fork](#whats-different-in-this-fork) below.
+> **This is a fork of [shraga100/claude-desktop-rtl-patch](https://github.com/shraga100/claude-desktop-rtl-patch).** All the credit for the original patch, the ASAR injection workflow, the executable hash replacement, and the certificate-swap technique goes to the upstream project. This fork **deletes the original direction-detection logic and rewrites it from scratch** as five small, explicit rules so the result is predictable on mixed Hebrew/Arabic + English + math + code content. See [What's different in this fork](#whats-different-in-this-fork) below.
 
 ## What it does
 
@@ -16,42 +16,40 @@ Smart RTL (Right-to-Left) support for **Claude Desktop on Windows**. Adds automa
 
 ## What's different in this fork
 
-This fork is built directly on top of [shraga100/claude-desktop-rtl-patch](https://github.com/shraga100/claude-desktop-rtl-patch). The install flow, the ASAR injection, the executable hash patch, and the certificate swap are all unchanged. The only meaningful change is a fix to the direction-detection logic inside the injected JavaScript.
+This fork is built directly on top of [shraga100/claude-desktop-rtl-patch](https://github.com/shraga100/claude-desktop-rtl-patch). The install flow, the ASAR injection, the executable hash patch, and the certificate swap are all unchanged. **The direction-detection logic inside the injected JavaScript has been deleted and rewritten from scratch.**
 
-### The problem in the original patch
+### Why a rewrite
 
-The original direction-detection functions (`detectElDir` for DOM elements and `detectTextDir` for plain text) both ended with the same hardcoded fallback:
+The original detection chained several heuristics — first-strong character, leading-LTR stripping, per-line splitting, and a final majority-count fallback — and still misbehaved on common mixed content. Examples that came up in practice:
 
-```javascript
-return 'rtl'; // blind fallback
-```
+* A mostly-English sentence containing one Hebrew word would flip the whole paragraph to RTL.
+* A LaTeX-ish line like `P(X(x) = לכל` would be detected as RTL because the math symbols `( ) =` tipped the count incorrectly.
+* English math/code lines containing a single Hebrew variable name lost their LTR layout.
 
-That fallback fires whenever the text contains at least one RTL character but the earlier detection layers (first-strong character, stripping leading filenames/URLs) didn't reach a clear verdict. In practice this caused a very common bug:
+Patching the fallback once, twice, and then again with a math-symbol weight was a clear sign the heuristic stack itself was the problem. So this fork deletes the entire detection layer and replaces it with five small, explicit rules.
 
-* An English sentence that happens to contain a single Hebrew or Arabic word, name, or quotation mark would be flipped to RTL.
-* Long English paragraphs with one Hebrew character anywhere in them — even buried in the middle — were rendered right-aligned and mirrored.
-* Code-like content, log lines, or filenames that contained a single Arabic letter would lose their LTR layout entirely.
+### The five rules
 
-The function returned `'rtl'` no matter how lopsided the text actually was. Even a 500-character English paragraph with one Hebrew letter would be treated as RTL.
+**Rule 1 — Direction detection (single source of truth).**
+Walk the text. Skip every leading digit, symbol, math character, and whitespace character. The first *strong* character decides direction: Hebrew/Arabic → `rtl`, Latin (A–Z, a–z) → `ltr`. There are no fallbacks, no majority counts, and no per-element heuristics — this function is the only thing that decides direction anywhere in the patch.
 
-### The fix
+**Rule 2 — Math elements.**
+Any element whose class contains `math` or `katex` is forced to `dir="ltr"` and is never touched by any other rule. Math formulas always render LTR regardless of what characters they contain.
 
-Both blind fallbacks were replaced with a simple majority-count: count how many RTL characters appear vs. how many LTR (a–z, A–Z) characters appear, and return whichever side wins.
+**Rule 3 — Code elements.**
+`<pre>`, `<code>`, and `.code-block` (and `.code-block__code`) are forced to `dir="ltr"` and are never touched by any other rule. Code blocks always render LTR.
 
-```javascript
-var rtlCount = 0, ltrCount = 0;
-for (var i = 0; i < text.length; i++) {
-    if (isRTL(text[i])) rtlCount++;
-    else if (/[a-zA-Z]/.test(text[i])) ltrCount++;
-}
-return (rtlCount > ltrCount) ? 'rtl' : 'ltr';
-```
+**Rule 4 — Inputs.**
+Rule 1 is applied to every writable element — `<input>`, `<textarea>`, and `[contenteditable="true"]` — and re-runs on every `input` event. There is no special case for the chat input; writable elements are treated exactly like any other element.
 
-All the earlier detection layers (first-strong, leading-LTR stripping) are kept exactly as they were. Pure Hebrew and Arabic content still resolves to RTL the same way it did before — only the final tie-breaker changed, so mixed-language content now picks the dominant direction instead of always defaulting to RTL.
+**Rule 5 — Nested LTR inside RTL.**
+After Rule 1 flags a container as RTL, the patch scans the container's text nodes for *Latin runs* (a Latin letter and the symbols/digits next to it, ignoring anything inside a math or code element) and wraps each run in `<span dir="ltr">`. This is what keeps things like `P(X(x) = לכל` rendering correctly: the Hebrew flows RTL, the `P(X(x) =` is isolated as LTR.
+
+Rules 2 and 3 are absolute overrides — nothing changes their direction regardless of content. Rules 1, 4, and 5 are deterministic and depend on nothing more than the text itself.
 
 ### Other changes
 
-* Repository URLs in `install.ps1` and `patch.ps1` (the elevation re-download, the desktop shortcut, and the auto-update watcher) point at this fork so that re-downloads, the shortcut, and the watcher all stay in sync with the fix.
+* Repository URLs in `install.ps1` and `patch.ps1` (the elevation re-download, the desktop shortcut, and the auto-update watcher) point at this fork so that re-downloads, the shortcut, and the watcher all stay in sync with the new detection logic.
 
 Everything else — the menu options, the auto-update flow, the disclaimer, the certificate handling — is the original work of [shraga100](https://github.com/shraga100) and the upstream contributors.
 
