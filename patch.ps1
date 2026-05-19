@@ -190,7 +190,7 @@ $RTL_INJECTION_CODE = @'
             var rtlCount = 0, ltrCount = 0;
             for (var i = 0; i < text.length; i++) {
                 if (isRTL(text[i])) rtlCount++;
-                else if (/[a-zA-Z]/.test(text[i])) ltrCount++;
+                else if (/[a-zA-Z()=+\-*\/^<>|]/.test(text[i])) ltrCount++;
             }
             return (rtlCount > ltrCount) ? 'rtl' : 'ltr';
         }
@@ -211,7 +211,7 @@ $RTL_INJECTION_CODE = @'
             var rtlCount = 0, ltrCount = 0;
             for (var i = 0; i < text.length; i++) {
                 if (isRTL(text[i])) rtlCount++;
-                else if (/[a-zA-Z]/.test(text[i])) ltrCount++;
+                else if (/[a-zA-Z()=+\-*\/^<>|]/.test(text[i])) ltrCount++;
             }
             return (rtlCount > ltrCount) ? 'rtl' : 'ltr';
         }
